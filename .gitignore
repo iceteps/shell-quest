@@ -1,0 +1,7 @@
+# personal progress — every player keeps their own
+progress.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
