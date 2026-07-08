@@ -21,9 +21,10 @@ Topics: `docker` · `git` · `k8s` · `helm` · `ansible` · `terraform` · `rab
 - Options are shuffled each run, so you can't memorise "it's always b".
 
 ## Study loop
-Weak on a topic? Open the matching note in the Obsidian vault
-(`laVault/devopsExperts/Class NN …`), do its drills, then run
-`python quiz.py --topic <that topic>` to check yourself.
+Weak on a topic? Open the matching note in the
+[study vault](https://github.com/iceteps/devops-study-vault), do its drills, then run
+`python quiz.py --topic <that topic>` to check yourself. For hands-on Docker/Git
+practice, play the missions in the repo root: `python quest.py`.
 
 > Want more questions? They live in the `QUESTIONS` list at the top of `quiz.py` —
 > add your own in the same format. Contributions from classmates welcome. 🎓

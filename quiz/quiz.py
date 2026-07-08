@@ -227,7 +227,7 @@ def main():
     print(f"Score: {c(str(score), 'bold')}/{total}  ({pct}%)")
     print(f"Best streak: {c(str(best_streak), 'magenta')} 🔥")
     print("Rank:  " + rank(pct))
-    print(c("\nStudy the notes in your Obsidian vault, then run me again. 📚", "dim"))
+    print(c("\nStudy the notes (github.com/iceteps/devops-study-vault), then run me again. 📚", "dim"))
 
 
 if __name__ == "__main__":
