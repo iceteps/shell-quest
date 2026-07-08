@@ -73,6 +73,20 @@ Every mission ships with a solution script. This proves all of them are completa
 python quest.py --selftest
 ```
 
+## Also in this repo: ⚡ the quick quiz
+
+`quiz/quiz.py` — a zero-setup rapid-fire quiz across **all** course topics (K8s, Helm,
+Ansible, Terraform, RabbitMQ, GitOps too — broader than the missions). Perfect for a
+5-minute warm-up when a full mission is too much:
+
+```bash
+python quiz/quiz.py                 # 12 random questions
+python quiz/quiz.py --topic git     # drill one topic
+```
+
+Same repo on purpose (monorepo!): one clone gets you both games, and adding a course
+topic updates missions and quiz questions in a single commit.
+
 ## Fork it, make it yours 🍴
 
 This repo is built to be forked by classmates:
