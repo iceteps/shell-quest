@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A terminal learning game for a DevOps course: students type **real** `docker`/`git` commands against a simulated world. Two entry points:
+A terminal learning game for a DevOps course: students type **real** `docker`/`git`/`kubectl`/`helm`/`ansible`/`terraform` commands against a simulated world. Two entry points:
 
 - `quest.py` — mission-based game (the main event). Engine in `engine.py`, missions in `missions/*.py`.
 - `quiz/quiz.py` — standalone rapid-fire quiz across all course topics.
@@ -21,9 +21,11 @@ Runs every mission's embedded `solution` script and fails if any mission can't b
 
 ## How the game works (design rules)
 
-- `engine.py` holds a `World` (containers, images, networks, host files, git state) and simulates commands against it. Missions win by **checking world state, never by matching keystrokes** — any correct command route must win.
-- Missions are dicts: `world` (starting state), `objectives` (each: `desc`, `xp`, `hint`, `check(world)` lambda), `solution` (proves completability — mandatory), optional `handlers` (regex → function, for behavior the engine doesn't simulate natively; they run BEFORE generic dispatch and can override anything).
+- `engine.py` holds a `World` (containers, images, networks, host files, git state, and an optional `k8s` cluster with a real reconcile loop — deleting an owned pod respawns it) and simulates commands against it. Missions win by **checking world state, never by matching keystrokes** — any correct command route must win.
+- Engine-native commands: `docker` (incl. `docker compose`), `git`, `kubectl`, `minikube`. Helm/ansible/terraform/argocd/pika live as **mission-local handlers** in their topic modules (`helm_release.py`, `ansible_ops.py`, `terraform_infra.py`, `gitops_ci.py`, `rabbitmq_queue.py`) per the promote-only-when-2+-missions-need-it rule.
+- Missions are dicts: `world` (starting state), `objectives` (each: `desc`, `xp`, `hint`, `check(world)` lambda), `solution` (proves completability — mandatory; it also powers `demo`), optional `handlers` (regex → function, for behavior the engine doesn't simulate natively; they run BEFORE generic dispatch and can override anything).
 - Hints cost 5 XP; finishing hint-free earns +10. Keep XP values in the ranges the existing missions use.
+- **Demo mode** (`demo` in a fresh mission) replays the `solution` step-by-step: Enter advances, `takeover` hands control back mid-run. Objectives completed during demo pay 0 XP and an all-demo run is never recorded — watching teaches, doing scores. Because `solution` doubles as the demo script, keep solutions clean and pedagogically ordered (inspect → act → verify), not just minimal.
 - Error messages should mimic the real tools' output (e.g. `denied: requested access to the resource is denied`) — the authenticity is the pedagogy. A dim parenthetical teaching hint after a realistic error is the house style.
 
 ## Adding a mission

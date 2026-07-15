@@ -132,6 +132,82 @@ QUESTIONS = [
      "options": ["Two envs; switch all traffic at once, instant rollback", "Deploy on Tuesdays", "Only for databases", "A testing framework"], "answer": 0},
     {"topic": "foundations", "q": "A fixed-length iteration in Scrum is called a...",
      "options": ["standup", "sprint", "backlog", "epic"], "answer": 1},
+
+    # ---------------- Docker (round 2) ----------------
+    {"topic": "docker", "q": "You push <repo>:1.0 to Docker Hub and get 'denied: requested access…' even though you're logged in. Most likely cause?",
+     "options": ["Docker Hub is down", "The image isn't namespaced <your-username>/<repo>", "The tag must be 'latest'", "You need sudo"], "answer": 1},
+    {"topic": "docker", "q": "Why does `docker login` want an ACCESS TOKEN instead of your account password?",
+     "options": ["Tokens are shorter", "Tokens are revocable + scoped — leak one, kill one, account survives", "Passwords don't work over HTTP", "It doesn't matter"], "answer": 1},
+    {"topic": "docker", "q": "Type the command that removes stopped containers + dangling images in one go:",
+     "accept": ["docker system prune"]},
+
+    # ---------------- Git (round 2 — the bonus assignment) ----------------
+    {"topic": "git", "q": "You need to switch branches NOW but have messy uncommitted changes. The course-approved move?",
+     "options": ["git commit -m 'wip'", "git stash (then git stash pop later)", "Delete the changes", "git push -f"], "answer": 1},
+    {"topic": "git", "q": "git revert vs git reset --hard: which one is SAFE on pushed history, and why?",
+     "options": ["reset — it's stronger", "revert — it ADDS an undo commit instead of rewriting history", "Both equal", "Neither works on pushed commits"], "answer": 1},
+    {"topic": "git", "q": "After `git checkout <commit-hash>` git warns you are in ... state?",
+     "accept": ["detached head", "detached"]},
+    {"topic": "git", "q": "Type the command that marks the current commit as version v1.0.0:",
+     "accept": ["git tag v1.0.0"]},
+    {"topic": "git", "q": "Rebase vs merge: what does rebase promise that merge doesn't?",
+     "options": ["It's faster", "A LINEAR history (no merge commits)", "It can't conflict", "It auto-pushes"], "answer": 1},
+
+    # ---------------- Kubernetes (round 2 — the real assignments) ----------------
+    {"topic": "k8s", "q": "`kubectl get pods` prints 'No resources found' but you KNOW the app is deployed. First thing to check?",
+     "options": ["Reinstall kubectl", "The namespace — add -n <namespace> (or -A)", "Restart minikube", "The YAML is corrupt"], "answer": 1},
+    {"topic": "k8s", "q": "You delete a pod owned by a Deployment. What do you see in `kubectl get pods` a moment later?",
+     "options": ["One pod fewer", "Same count — a NEW pod with a new name replaced it", "All pods restarted", "An error"], "answer": 1},
+    {"topic": "k8s", "q": "Type the command to scale deployment `backend` to 3 replicas (default namespace):",
+     "accept": ["kubectl scale deployment backend --replicas=3", "kubectl scale deploy backend --replicas=3"]},
+    {"topic": "k8s", "q": "In the CLI assignment, why is the frontend browser-reachable but the backend is not?",
+     "options": ["The backend crashed", "frontend Service is NodePort; backend is ClusterIP (internal-only)", "Firewall rules", "The backend has no pods"], "answer": 1},
+    {"topic": "k8s", "q": "The RBAC trio that grants an app permission is ServiceAccount + Role + ...?",
+     "accept": ["rolebinding", "role binding"]},
+    {"topic": "k8s", "q": "Which minikube command opens a NodePort service in your browser?",
+     "options": ["minikube open <svc>", "minikube service <svc>", "minikube expose <svc>", "minikube browse"], "answer": 1},
+    {"topic": "k8s", "q": "Deployment → ReplicaSet → Pod: why does `kubectl set image` create a NEW ReplicaSet?",
+     "options": ["A bug", "Each RS pins one pod-template version — that's how rollbacks are possible", "RS expire daily", "To use more RAM"], "answer": 1},
+
+    # ---------------- Helm (round 2) ----------------
+    {"topic": "helm", "q": "Type the command that undoes release `demo` back to revision 1:",
+     "accept": ["helm rollback demo 1", "helm rollback demo"]},
+    {"topic": "helm", "q": "`helm upgrade demo ./chart --set replicaCount=4` — what wins when values.yaml says 2?",
+     "options": ["values.yaml (files beat flags)", "--set (CLI overrides file defaults)", "Neither — error", "Random"], "answer": 1},
+    {"topic": "helm", "q": "One release, several upgrades later — which command lists every revision?",
+     "options": ["helm list", "helm history <release>", "helm log", "helm get all"], "answer": 1},
+
+    # ---------------- Ansible (round 2) ----------------
+    {"topic": "ansible", "q": "The file listing which hosts Ansible manages (the class used INI format) is the...",
+     "accept": ["inventory", "hosts"]},
+    {"topic": "ansible", "q": "`ansible-playbook play.yml --check` does what?",
+     "options": ["Syntax check only", "DRY RUN — reports would-be changes, touches nothing", "Runs twice", "Checks SSH keys"], "answer": 1},
+    {"topic": "ansible", "q": "Second run of a correct playbook shows changed=0. That property is called...",
+     "accept": ["idempotency", "idempotent", "idempotence"]},
+
+    # ---------------- Terraform (round 2) ----------------
+    {"topic": "terraform", "q": "Fresh clone of a terraform repo. `terraform plan` errors about plugins/providers. The fix?",
+     "accept": ["terraform init"]},
+    {"topic": "terraform", "q": "In CI there's no human to type 'yes'. How do pipelines apply?",
+     "options": ["echo yes | terraform apply", "terraform apply -auto-approve", "terraform apply --force", "They can't"], "answer": 1},
+    {"topic": "terraform", "q": "Lab's over. Which command deletes every resource Terraform created (and why run it)?",
+     "options": ["terraform rm -all", "terraform destroy — so the cloud stops billing you", "terraform reset", "Delete main.tf"], "answer": 1},
+
+    # ---------------- RabbitMQ (round 2) ----------------
+    {"topic": "rabbitmq", "q": "Producer sends 5 messages while NO consumer is running. What happens to them?",
+     "options": ["Lost", "The queue holds them until a consumer connects — that's the decoupling", "Error thrown", "Sent back"], "answer": 1},
+    {"topic": "rabbitmq", "q": "The RabbitMQ management web UI (class compose file) listens on port...",
+     "accept": ["15672"]},
+    {"topic": "rabbitmq", "q": "Type the in-container command that lists queues and their depth:",
+     "accept": ["rabbitmqctl list_queues"]},
+
+    # ---------------- GitOps (round 2) ----------------
+    {"topic": "gitops", "q": "In the class-8 flow, who is allowed to change the image tag in values.yaml?",
+     "options": ["Any engineer, by hand", "The CI pipeline (a bot commit) — humans only push code", "The cluster", "ArgoCD support"], "answer": 1},
+    {"topic": "gitops", "q": "Someone kubectl-edits prod directly. ArgoCD (with self-heal) will...",
+     "options": ["Keep the manual change", "Revert it to match Git — Git is the only truth", "Crash", "Email the CEO"], "answer": 1},
+    {"topic": "gitops", "q": "ArgoCD reports OutOfSync. What does that literally mean?",
+     "options": ["The cluster is down", "Git's desired state ≠ the cluster's live state", "ArgoCD needs an update", "The repo was deleted"], "answer": 1},
 ]
 
 TOPIC_NAMES = {
