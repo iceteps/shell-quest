@@ -122,6 +122,13 @@ MISSIONS = [
              "hint": "python consumer.py",
              "check": lambda w: w.flags.get("consumed") and w.flags.get("queue_depth") == 0},
         ],
+        "teach": [
+            "compose up -d boots a whole service stack from one file — infrastructure as a checklist.",
+            "The startup log is the readiness check — 'Server startup complete' means the listeners are up.",
+            "The producer worked with NO consumer alive — decoupling is the entire point of a queue.",
+            "rabbitmqctl list_queues shows depth: 5 messages waiting patiently, nothing lost.",
+            "The consumer drained the backlog on arrival — sender and receiver never had to meet.",
+        ],
         "solution": [
             "docker compose up -d",
             "docker logs rabbitmq",

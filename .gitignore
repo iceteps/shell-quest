@@ -8,3 +8,6 @@ __pycache__/
 
 # local working docs (never committed)
 /plans/
+
+# personal vault link (each player points at their own vault)
+quest.config.json

@@ -158,6 +158,13 @@ MISSIONS = [
              "hint": "ansible-doc apt — docs + copy-paste examples, offline.",
              "check": lambda w: w.flags.get("ansible_doc")},
         ],
+        "teach": [
+            "ping proves SSH + Python reachability — agentless means NOTHING to install on the nodes.",
+            "One playbook, N hosts, identical result — the inventory decides who gets configured.",
+            "changed=0 on the re-run IS idempotency: safe to run anytime; only drift gets fixed.",
+            "notify + handler: the restart fired ONLY because something really changed — once, at the end.",
+            "ansible-doc is offline docs with copy-paste examples — faster than any browser tab.",
+        ],
         "solution": [
             "ansible all -i hosts -m ping",
             "ansible-playbook -i hosts playbook.yml",

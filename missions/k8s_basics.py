@@ -139,6 +139,14 @@ MISSIONS = [
              "hint": "minikube has a one-word subcommand that opens a Service for you: minikube service <name>.",
              "check": lambda w: w.flags.get("minikube_service_frontend")},
         ],
+        "teach": [
+            "minikube start boots a one-node cluster — kubectl talks to it from that second on.",
+            "cluster-info + get nodes: the two-second health check before touching anything.",
+            "`apply -f .` is declarative — k8s reads the desired state and makes it real.",
+            "You applied Deployments, not Pods — the pods were created FOR you. That's the management chain.",
+            "The TYPE column decides reachability: ClusterIP = internal-only, NodePort = a door to the outside.",
+            "minikube service opens NodePort services in a browser — the screenshot the assignment wants.",
+        ],
         "solution": [
             "minikube start",
             "kubectl cluster-info",
@@ -184,6 +192,13 @@ MISSIONS = [
             {"desc": "Describe a pod and read its Events (debug gold)", "xp": 10,
              "hint": "kubectl describe pod <name-or-prefix> -n dev — the Events at the bottom tell the story.",
              "check": lambda w: w.flags.get("describe_pod")},
+        ],
+        "teach": [
+            "An empty list ≠ nothing running — everything is namespace-scoped. Make -n (or -A) a reflex.",
+            "You deleted a pod and the count healed: the ReplicaSet reconciles actual→desired. Self-healing is a LOOP, not magic.",
+            "scale edits desired state; the reconcile loop does the labor. No YAML file was harmed.",
+            "set image rolls pods via a NEW ReplicaSet — the old one is kept, which is exactly how rollback works.",
+            "describe's Events section is where Kubernetes tells you WHY — read it before googling.",
         ],
         "solution": [
             "kubectl get pods",
@@ -236,6 +251,13 @@ MISSIONS = [
             {"desc": "Delete the RoleBinding, prove the permission is GONE (answer: no)", "xp": 25,
              "hint": "kubectl delete rolebinding pod-reader-binding -n dev — then run the same can-i again.",
              "check": lambda w: w.flags.get("binding_deleted") and w.flags.get("can_i") == "no"},
+        ],
+        "teach": [
+            "Namespaces are logical walls — cheap isolation, and the unit RBAC operates within.",
+            "ConfigMap = plain config, Secret = base64 (encoding, NOT encryption) — both decouple config from images.",
+            "ServiceAccount = identity, Role = permissions, RoleBinding = the glue. No binding, no access.",
+            "auth can-i answers permission questions WITHOUT attempting the action — audit tool #1.",
+            "Deleting only the BINDING revoked access — identity and permissions still exist; the grant was the glue.",
         ],
         "solution": [
             "kubectl apply -f namespace.yaml",

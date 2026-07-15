@@ -120,6 +120,13 @@ MISSIONS = [
              "check": lambda w: w.flags.get("describe_deploy_skywatch")
                                 and w.k8s["deployments"].get("skywatch", {}).get("image", "").endswith("v2")},
         ],
+        "teach": [
+            "You change CODE, commit, push. In GitOps that's the last manual step there is.",
+            "CI built, pushed, and committed the tag bump itself — with [skip ci] so it can't loop forever.",
+            "OutOfSync = Git and the cluster disagree. GitOps makes drift VISIBLE instead of silent.",
+            "sync makes the cluster obey Git — the only 'deploy button' left in the building.",
+            "v2 rolled out with zero kubectl apply from you — Git is the single source of truth.",
+        ],
         "solution": [
             "edit app.py",
             "from flask import Flask", "app = Flask(__name__)", "",

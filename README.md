@@ -1,5 +1,7 @@
 # 🗡️ Shell Quest
 
+![selftest](https://github.com/iceteps/shell-quest/actions/workflows/selftest.yml/badge.svg)
+
 **Learn DevOps by typing the real commands.** A terminal game: you get missions
 ("the app is down — fix it"), a simulated world (containers, images, networks,
 git branches, a Kubernetes cluster, cloud resources), and you solve them with
@@ -47,8 +49,19 @@ Objectives check **state, not keystrokes** — any correct route wins. Finish a
 mission with **zero hints and no demo** for a +10 XP bonus. XP levels you up:
 Rookie → Tinkerer → Operator → Engineer → Senior → DevOps Legend.
 
+**Every objective teaches.** The moment you complete one, a 📚 one-liner tells
+you the *transferable concept* you just used — and finishing a mission prints a
+"what you just practiced" recap. Typos get a gentle *did-you-mean* nudge.
+
 **New to a topic? The demo loop:** run the mission once with `demo` and just
 watch the commands and their real outputs; then replay it yourself for the XP.
+
+**📓 Obsidian player? Link your vault** and the game keeps a live progress note
+(mission checklist, XP, per-topic completion) inside it — updated on every save:
+
+```bash
+python quest.py --link-vault "<your-vault>/Shell Quest Progress.md"
+```
 
 ## Missions
 
@@ -69,9 +82,11 @@ watch the commands and their real outputs; then replay it yourself for the XP.
 | 📜 13 | Agentless Army | inventory, playbook, **idempotency**, handlers |
 | 🏗️ 14 | Declare the Cloud | terraform init → plan → apply → grow → destroy |
 | 📨 15 | Post Office | compose, producer/queue/consumer, decoupling |
+| 🛰️ 16 | **THE CAMPAIGN** | the whole course in one run: terraform → ansible → kubectl → helm → argocd → weather through the queue → destroy |
 
 Missions 4, 7, 8, and 10 mirror the course's actual graded assignments — beat
-them here first, then do the real thing with confidence.
+them here first, then do the real thing with confidence. Mission 16 is the
+capstone dress rehearsal: don't touch it until the others fall.
 
 ## Your progress
 

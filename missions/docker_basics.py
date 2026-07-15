@@ -76,6 +76,13 @@ MISSIONS = [
              "hint": "The command that lists RUNNING containers.",
              "check": lambda w: w.flags.get("ps")},
         ],
+        "teach": [
+            "Images download once and cache locally — `pull` fetches from a registry (Docker Hub by default).",
+            "-d runs detached (background); -it keeps an interactive terminal alive — bash would exit instantly without it.",
+            "`exec` enters a RUNNING container; `run` would have created a brand-new one.",
+            "A container's filesystem is its own little world — files you create live (and die) with it.",
+            "`docker ps` = running only; add -a and stopped containers appear too.",
+        ],
         "solution": [
             "docker pull ubuntu:latest",
             "docker run -dit --name devops1 ubuntu bash",
@@ -134,6 +141,13 @@ MISSIONS = [
              "hint": "curl localhost:8080",
              "check": lambda w: w.flags.get("curl_ok")},
         ],
+        "teach": [
+            "Crashed containers vanish from `docker ps` — `-a` is where the dead ones go.",
+            "`docker logs` keeps a container's output even after it dies — read it BEFORE guessing.",
+            "Dependencies bake into the image at BUILD time — fixing them means rebuilding, not restarting.",
+            "-p host:container publishes the port; a name conflict means the old container must go first.",
+            "Verify like an outsider: if curl can't reach it, neither can your users.",
+        ],
         "solution": [
             "docker ps -a",
             "docker logs webapp",
@@ -165,6 +179,11 @@ MISSIONS = [
             {"desc": "From INSIDE web1, ping web2 by name", "xp": 25,
              "hint": "docker exec -it web1 sh — then: ping web2",
              "check": lambda w: w.flags.get("ping_ok") in (("web1", "web2"), ("web2", "web1"))},
+        ],
+        "teach": [
+            "The default bridge has NO name-resolution — user-defined networks add container-name DNS.",
+            "--network at run-time wires a container into the network at birth.",
+            "Name-based discovery is how services find each other — the frontend will find 'rabbitmq' exactly like this.",
         ],
         "solution": [
             "docker network create demo-net",
@@ -207,6 +226,13 @@ MISSIONS = [
             {"desc": "Push your image to the public registry", "xp": 25,
              "hint": "docker push <username>/<repo> — pushing ALWAYS requires login, even for public repos.",
              "check": lambda w: w.flags.get("pushed_remote")},
+        ],
+        "teach": [
+            "FROM→WORKDIR→COPY→EXPOSE→CMD: base image, folder, code in, port documented, process to run.",
+            "`docker build -t <name> .` — the -t names the output, the dot is the build context.",
+            "Registry images are namespaced <user>/<repo> — that's ownership, not decoration.",
+            "Log in with an ACCESS TOKEN: revocable and scoped; your real password never touches a terminal.",
+            "Public = anyone can PULL; only the verified owner can PUSH. That's why login is non-negotiable.",
         ],
         "solution": [
             "cat app.py",

@@ -167,6 +167,14 @@ MISSIONS = [
              "hint": "terraform destroy (type yes) — free-tier stays free only if you clean up.",
              "check": lambda w: w.flags.get("tf_destroyed") and not w.flags.get("tf_state")},
         ],
+        "teach": [
+            "init downloads providers and wires the backend — always step zero in a fresh folder.",
+            "plan is the free preview — read the + and - lines BEFORE anything real happens.",
+            "apply executes the plan; the literal word 'yes' is the safety catch.",
+            "Growing infra = DECLARING more in code — the .tf files are the inventory of what exists.",
+            "-auto-approve exists because pipelines can't type yes — that's the CI mode.",
+            "destroy reverses everything state remembers — labs die with the session, and so do the bills.",
+        ],
         "solution": [
             "terraform init",
             "terraform plan",

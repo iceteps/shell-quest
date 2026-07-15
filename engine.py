@@ -5,6 +5,7 @@ state lives in a World object, commands are parsed and mutate it, and
 missions win by checking that state (never by matching your exact keystrokes —
 any correct route works).
 """
+import difflib
 import json
 import os
 import random
@@ -29,6 +30,12 @@ COLORS = {
 
 def c(text, color):
     return f"{COLORS[color]}{text}{COLORS['reset']}"
+
+
+def _suggest(word, options):
+    """Typo helper: '(did you mean: X?)' or '' if nothing is close."""
+    close = difflib.get_close_matches(word, list(options), n=1, cutoff=0.6)
+    return c(f"  (did you mean: {close[0]}?)", "dim") if close else ""
 
 
 class IO:
@@ -102,6 +109,7 @@ class World:
         if k is not None:
             self.k8s = {
                 "started": k.get("started", False),
+                "nodes": list(k.get("nodes", ["minikube"])),
                 "namespaces": set(k.get("namespaces", [])) | {"default", "kube-system"},
                 # deployments: name -> {ns, replicas, image, revision}
                 "deployments": {n: dict(d) for n, d in k.get("deployments", {}).items()},
@@ -332,7 +340,10 @@ def do_docker(world, args, io):
         world.flags["pushed_remote"] = img
 
     else:
-        io.print(f"docker: '{sub}' is not simulated (yet). Try `task` to see what the mission needs.")
+        known = ("pull", "images", "run", "ps", "logs", "exec", "stop", "start", "rm",
+                 "network", "build", "tag", "login", "push", "compose")
+        io.print(f"docker: '{sub}' is not simulated (yet)." + _suggest(sub, known))
+        io.print(c("Try `task` to see what the mission needs.", "dim"))
 
 
 # ---------------------------------------------------- inside-container shell --
@@ -609,8 +620,10 @@ def do_kubectl(world, args, io):
         world.flags["get_" + "_".join(kinds) + ("_A" if all_ns else "")] = True
         for kind in kinds:
             if kind == "nodes":
-                io.print(f"{'NAME':<12}{'STATUS':<9}{'ROLES':<16}{'AGE':<6}VERSION")
-                io.print(f"{'minikube':<12}{'Ready':<9}{'control-plane':<16}{'5m':<6}v1.30.0")
+                io.print(f"{'NAME':<20}{'STATUS':<9}{'ROLES':<16}{'AGE':<6}VERSION")
+                for i, node in enumerate(k["nodes"]):
+                    role = "control-plane" if i == 0 else "<none>"
+                    io.print(f"{node:<20}{'Ready':<9}{role:<16}{'5m':<6}v1.30.0")
                 world.flags["get_nodes"] = True
             elif kind == "namespaces":
                 io.print(f"{'NAME':<22}{'STATUS':<9}AGE")
@@ -693,7 +706,8 @@ def do_kubectl(world, args, io):
                     io.print(f"{n:<26}42s")
                 world.flags[f"get_{kind}"] = True
             else:
-                io.print(f'error: the server doesn\'t have a resource type "{kind}"')
+                io.print(f'error: the server doesn\'t have a resource type "{kind}"'
+                         + _suggest(kind, K8S_ALIASES))
 
     elif sub == "apply":
         if "-f" not in rest:
@@ -885,7 +899,10 @@ def do_kubectl(world, args, io):
         world.flags["explain"] = True
 
     else:
-        io.print(f"kubectl: '{sub}' is not simulated (yet). Try `task` to see what the mission needs.")
+        known = ("get", "apply", "delete", "describe", "logs", "scale", "set", "rollout",
+                 "auth", "create", "explain", "cluster-info", "version")
+        io.print(f"kubectl: '{sub}' is not simulated (yet)." + _suggest(sub, known))
+        io.print(c("Try `task` to see what the mission needs.", "dim"))
 
 
 def do_minikube(world, args, io):
@@ -1152,7 +1169,9 @@ def do_git(world, args, io):
                 io.print(c("+ " + line, "green"))
 
     else:
-        io.print(f"git: '{sub}' is not simulated (yet). Try `task`.")
+        known = ("status", "add", "commit", "log", "branch", "checkout", "switch",
+                 "merge", "push", "diff")
+        io.print(f"git: '{sub}' is not simulated (yet)." + _suggest(sub, known))
 
 
 # -------------------------------------------------------------- host shell --
@@ -1255,7 +1274,10 @@ def dispatch(world, line, io, mission):
     elif prog in ("quit", "exit"):
         return False
     else:
-        io.print(f"{prog}: command not found — `task` shows the goal, `hint` costs a little XP, `quit` leaves")
+        known = ["docker", "git", "kubectl", "minikube", "helm", "terraform", "ansible",
+                 "ansible-playbook", "argocd", "ls", "cat", "touch", "rm", "echo", "edit", "python"]
+        io.print(f"{prog}: command not found" + _suggest(prog, known))
+        io.print(c("`task` shows the goal · `hint` costs a little XP · `demo` shows it solved · `quit` leaves", "dim"))
     return True
 
 
@@ -1304,9 +1326,11 @@ def run_mission(mission, profile, io=None):
 
     show_task()
 
+    teach = mission.get("teach", [])
+
     def check_objs(demo=False):
         nonlocal xp_earned
-        for o in objectives:
+        for i, o in enumerate(objectives):
             if not o["done"] and o["check"](world):
                 o["done"] = True
                 if demo:
@@ -1314,6 +1338,8 @@ def run_mission(mission, profile, io=None):
                 else:
                     xp_earned += o["xp"]
                     io.print(c(f"  ✔ OBJECTIVE COMPLETE: {o['desc']}  (+{o['xp']} XP)", "green"))
+                if i < len(teach):
+                    io.print(c(f"     📚 {teach[i]}", "cyan"))
 
     while True:
         prompt = c(f"({world.inside}) $ " if world.inside else "$ ", "cyan")
@@ -1388,11 +1414,16 @@ def run_mission(mission, profile, io=None):
             if demo_used:
                 io.print(c("   (finished after a demo assist — demoed objectives paid no XP)", "dim"))
             io.print(c(f"   earned {xp_earned} XP · hints used: {hints_used}", "bold"))
+            if teach:
+                io.print(c("\n📚 What you just practiced:", "cyan"))
+                for line in teach[:len(objectives)]:
+                    io.print(c(f"   • {line}", "dim"))
             return True, xp_earned, hints_used
 
 
 # ----------------------------------------------------------------- profile --
 PROFILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "progress.json")
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quest.config.json")
 
 
 def load_profile():
@@ -1402,9 +1433,71 @@ def load_profile():
     return {"name": None, "xp": 0, "completed": {}}
 
 
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_config(config):
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+
+
+def sync_vault_note(profile):
+    """If the player linked an Obsidian vault (quest.config.json — gitignored),
+    render progress as a markdown note there. Never breaks the game on failure."""
+    target = load_config().get("vault_progress_file")
+    if not target:
+        return None
+    try:
+        from datetime import datetime
+        from missions import ALL_MISSIONS, TOPICS
+        lvl, lvl_name = level(profile["xp"])
+        done = profile["completed"]
+        total_xp_possible = sum(sum(o["xp"] for o in m["objectives"]) + 10 for m in ALL_MISSIONS)
+        lines = [
+            "---",
+            "tags: [devops, shell-quest, progress, auto-generated]",
+            "---",
+            "",
+            "# 🗡️ Shell Quest Progress",
+            "",
+            f"> [!success] {profile.get('name') or 'player'} — Level {lvl} **{lvl_name}** · "
+            f"{profile['xp']} XP · {len(done)}/{len(ALL_MISSIONS)} missions",
+            f"> Auto-written by the game on every save (last: {datetime.now():%Y-%m-%d %H:%M}). "
+            f"Don't edit — play instead: `python quest.py`. Ladder home: [[🎓 Mastery Path]].",
+            "",
+            "| # | Mission | Topic | Status | Best XP |",
+            "|---|---|---|---|---|",
+        ]
+        for n, m in enumerate(ALL_MISSIONS, 1):
+            rec = done.get(m["id"])
+            status = "✅" if rec else "🔓"
+            best = str(rec["xp"]) if rec else "—"
+            lines.append(f"| {n} | {m['title']} | {TOPICS[m['topic']]} | {status} | {best} |")
+        lines += [
+            "",
+            f"Earned {profile['xp']} of ~{total_xp_possible} XP available across all missions.",
+            "",
+            "**Per-topic:** " + " · ".join(
+                f"{TOPICS[t]} {sum(1 for m in ALL_MISSIONS if m['topic'] == t and m['id'] in done)}"
+                f"/{sum(1 for m in ALL_MISSIONS if m['topic'] == t)}"
+                for t in TOPICS),
+            "",
+        ]
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        return target
+    except Exception:
+        return None  # a broken vault path must never kill the game
+
+
 def save_profile(profile):
     with open(PROFILE_PATH, "w", encoding="utf-8") as f:
         json.dump(profile, f, indent=2)
+    sync_vault_note(profile)
 
 
 def level(xp):

@@ -189,6 +189,14 @@ MISSIONS = [
              "hint": "helm history demo",
              "check": lambda w: w.flags.get("helm_history")},
         ],
+        "teach": [
+            "helm template renders locally — see exactly what WOULD hit the cluster, before it does.",
+            "install = render + apply + record REVISION 1. A release is a chart instance with a history.",
+            "Helm is a factory for ordinary k8s objects — after install it's just deployments and pods.",
+            "--set overrides values.yaml at the CLI — same chart, different knobs per environment.",
+            "rollback doesn't rewind time — it re-applies the OLD values as a NEW revision.",
+            "helm history turns deploys into an audit log — every change has a number.",
+        ],
         "solution": [
             "helm template ./my-service",
             "helm install demo ./my-service",

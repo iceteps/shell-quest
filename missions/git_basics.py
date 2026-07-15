@@ -56,6 +56,13 @@ MISSIONS = [
              "hint": "First-ever push of a branch: git push -u origin main.",
              "check": lambda w: w.git and "main" in w.git["pushed"]},
         ],
+        "teach": [
+            "New files start UNTRACKED — git ignores them until you say otherwise.",
+            "`git status` before AND after everything — it's your instrument panel.",
+            "`add` stages: you choose exactly what goes into the next snapshot.",
+            "A commit is a permanent snapshot plus a message future-you will actually read.",
+            "First push of a branch needs -u to wire local↔remote; afterwards plain `git push` works.",
+        ],
         "solution": [
             "edit app.py",
             'def greet(name):', '    return f"Hello, {name}!"', "",
@@ -95,6 +102,12 @@ MISSIONS = [
             {"desc": "Push the branch to GitHub", "xp": 15,
              "hint": "A brand-new branch needs: git push -u origin feature/add-time.",
              "check": lambda w: w.git and "feature/add-time" in w.git["pushed"]},
+        ],
+        "teach": [
+            "checkout -b creates AND switches in one move — branches are free, spend them on every feature.",
+            "Edits ride on whichever branch is checked out — the branch you're ON owns the change.",
+            "Commits on a feature branch leave main untouched — that isolation is the whole point.",
+            "Pushing a branch shares work WITHOUT merging it — review happens before merge, not after.",
         ],
         "solution": [
             "git checkout -b feature/add-time",
@@ -147,6 +160,13 @@ MISSIONS = [
             {"desc": "Read your history (the assignment's submission proof)", "xp": 10,
              "hint": "git log --oneline",
              "check": lambda w: w.flags.get("git_log")},
+        ],
+        "teach": [
+            "A conflict isn't an error — it's git asking a HUMAN to choose between two truths.",
+            "<<<<<<< HEAD is YOUR side, >>>>>>> is THEIRS, ======= divides them — read both before deciding.",
+            "Resolving = writing the final truth and deleting every marker; keep BOTH ideas when both matter.",
+            "`add` marks it resolved; the commit seals a merge with two parents.",
+            "`git log --graph` draws the merge diamond — visual proof of the story.",
         ],
         "solution": [
             "git merge feature/add-time",
