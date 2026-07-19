@@ -91,6 +91,7 @@ class World:
         self.files = dict(spec.get("files", {}))       # host cwd files
         self.inside = None                              # container we're exec'd into
         self.flags = {}                                 # mission scratch space
+        self.history = []                               # commands the player typed
         g = spec.get("git")
         self.git = None
         if g is not None:
@@ -339,7 +340,14 @@ def do_docker(world, args, io):
         io.print(f"{img.rsplit(':', 1)[1]}: digest: sha256:{_rand_id()}{_rand_id()} size: 1234")
         world.flags["pushed_remote"] = img
 
+    elif sub in ("ls", "list"):
+        world.flags["_noop"] = True
+        io.print("Almost! docker lists each kind of thing with its own command:")
+        io.print(c("  docker images   → images you've downloaded", "dim"))
+        io.print(c("  docker ps       → running containers  (add -a to include stopped ones)", "dim"))
+
     else:
+        world.flags["_noop"] = True
         known = ("pull", "images", "run", "ps", "logs", "exec", "stop", "start", "rm",
                  "network", "build", "tag", "login", "push", "compose")
         io.print(f"docker: '{sub}' is not simulated (yet)." + _suggest(sub, known))
@@ -371,6 +379,12 @@ def run_inside(world, name, cmd, io):
         io.print(files.get(args[0], f"cat: {args[0]}: No such file"))
     elif prog == "pwd":
         io.print("/root")
+    elif prog == "whoami":
+        io.print("root")
+    elif prog == "hostname":
+        io.print(world.containers[name]["id"])
+    elif prog == "clear":
+        io.print("\033[2J\033[H")
     elif prog == "echo":
         io.print(" ".join(args))
     elif prog == "ping" and args:
@@ -387,7 +401,10 @@ def run_inside(world, name, cmd, io):
             io.print(f"ping: {target}: Name or service not known")
             io.print(c("(hint: name-resolution only works on a USER-DEFINED network, and the target must be running)", "dim"))
     else:
-        io.print(f"{prog}: not available in this tiny container shell")
+        world.flags["_noop"] = True
+        io.print(f"{prog}: not available in this tiny container shell — it knows: "
+                 "ls, cat, touch, mkdir, cp, mv, echo, pwd, whoami, hostname, ping")
+        io.print(c("(you're INSIDE a container right now — `exit` brings you back to the host)", "dim"))
 
 
 # -------------------------------------------------------------- kubernetes --
@@ -899,6 +916,7 @@ def do_kubectl(world, args, io):
         world.flags["explain"] = True
 
     else:
+        world.flags["_noop"] = True
         known = ("get", "apply", "delete", "describe", "logs", "scale", "set", "rollout",
                  "auth", "create", "explain", "cluster-info", "version")
         io.print(f"kubectl: '{sub}' is not simulated (yet)." + _suggest(sub, known))
@@ -1169,6 +1187,7 @@ def do_git(world, args, io):
                 io.print(c("+ " + line, "green"))
 
     else:
+        world.flags["_noop"] = True
         known = ("status", "add", "commit", "log", "branch", "checkout", "switch",
                  "merge", "push", "diff")
         io.print(f"git: '{sub}' is not simulated (yet)." + _suggest(sub, known))
@@ -1187,10 +1206,43 @@ def _mark_edited(world, fname):
         g["untracked"].add(fname)
 
 
+COMMON_IMAGES = {"ubuntu", "nginx", "alpine", "redis", "python", "busybox", "hello-world"}
+
+
 def do_host(world, prog, args, io):
     files = world.files
     if prog == "ls":
-        io.print("  ".join(sorted(files)) if files else "")
+        target = next((a for a in args if not a.startswith("-")), None)
+        if target:
+            if target in files:
+                io.print(target)
+            else:
+                io.print(f"ls: cannot access '{target}': No such file or directory")
+                base = target.split(":")[0]
+                if base in COMMON_IMAGES or any(i.startswith(base) for i in world.images):
+                    io.print(c(f"({target} is a docker IMAGE, not a file — images are listed with: docker images)", "dim"))
+        elif files:
+            io.print("  ".join(sorted(files)))
+        else:
+            io.print(c("(the host folder is empty — this mission's action happens elsewhere; `task` shows where)", "dim"))
+    elif prog == "pwd":
+        io.print("/root/quest")
+    elif prog == "whoami":
+        io.print("root")
+    elif prog == "hostname":
+        io.print("quest-host")
+    elif prog == "clear":
+        io.print("\033[2J\033[H")
+    elif prog == "date":
+        from datetime import datetime
+        io.print(datetime.now().strftime("%a %b %d %H:%M:%S %Y"))
+    elif prog == "uname":
+        io.print("Linux quest-host 6.8.0-quest x86_64 GNU/Linux" if args else "Linux")
+    elif prog == "history":
+        for i, cmd in enumerate(world.history, 1):
+            io.print(f"  {i}  {cmd}")
+    elif prog == "mkdir" and args:
+        files[args[-1].rstrip("/") + "/"] = ""
     elif prog == "cat":
         if not args:
             io.print("cat: needs a file"); return
@@ -1227,7 +1279,70 @@ def do_host(world, prog, args, io):
         _mark_edited(world, fname)
         io.print(c(f"saved {fname}", "dim"))
     else:
-        io.print(f"{prog}: command not found (this simulated shell knows: ls, cat, touch, rm, echo, edit)")
+        world.flags["_noop"] = True
+        io.print(f"{prog}: command not found (this simulated shell knows: ls, cat, touch, mkdir, rm, "
+                 "echo, edit, pwd, whoami, clear, history)")
+
+
+# ------------------------------------------------- real-world command atlas --
+# Commands players type because they're REAL — recognized and redirected with a
+# micro-lesson instead of a cold "command not found". (headline, dim follow-up)
+_PKG_MGR = ("🌍 `{cmd}` is real — a package manager. It installs APPS on your machine "
+            "(e.g. it could install Docker itself).",
+            "Here Docker is already installed — and an IMAGE isn't an app: Docker fetches "
+            "those itself → docker pull <image>")
+_EDITOR = ("🌍 `{cmd}` is a real editor — this world ships a tiny one instead: edit <file>",
+           "type the new content, finish with a single `.` on its own line")
+REAL_WORLD = {
+    "winget": _PKG_MGR, "choco": _PKG_MGR, "scoop": _PKG_MGR,
+    "apt": _PKG_MGR, "apt-get": _PKG_MGR, "yum": _PKG_MGR, "dnf": _PKG_MGR, "brew": _PKG_MGR,
+    "wsl": ("🌍 `wsl` opens a Linux shell on a real Windows box — good instinct!",
+            "this quest already dropped you INTO a Linux-ish host: docker & friends work right here"),
+    "sudo": ("🌍 no `sudo` needed — you're already root in this world.",
+             "on a real Linux box docker often DOES need sudo, or your user in the `docker` group"),
+    "ssh": ("🌍 `ssh` connects to a REMOTE machine — this world is a single host.",
+            "the Ansible missions are where 'many machines' happens (agentless, over ssh — simulated)"),
+    "ps": ("🌍 plain `ps` lists Linux processes — in docker-land the 'processes' are containers:",
+           "docker ps (running) · docker ps -a (including stopped)"),
+    "top": ("🌍 `top` watches Linux processes — here the things that run are containers:",
+            "docker ps shows them · docker logs <name> shows what one is saying"),
+    "htop": ("🌍 `htop` watches Linux processes — here the things that run are containers:",
+             "docker ps shows them · docker logs <name> shows what one is saying"),
+    "ifconfig": ("🌍 `ifconfig` shows real network interfaces — this world's networking is docker's:",
+                 "docker network ls · docker network create <name>"),
+    "ipconfig": ("🌍 `ipconfig` is the Windows one — this world's networking is docker's:",
+                 "docker network ls · docker network create <name>"),
+    "ip": ("🌍 `ip` manages real Linux networking — this world's networking is docker's:",
+           "docker network ls · docker network create <name>"),
+    "cd": ("🌍 this world is one folder — no `cd` needed.",
+           "`ls` lists the host's files; a container's files are separate (docker exec … to go inside)"),
+    "vi": _EDITOR, "vim": _EDITOR, "nano": _EDITOR, "code": _EDITOR, "notepad": _EDITOR,
+    "man": ("🌍 `man` — reading the manual — is exactly the right instinct.",
+            "here: `help` lists what works · `learn` opens the vault note · `hint` nudges the next step"),
+    "curl": ("🌍 `curl` talks HTTP to a URL — it works the moment a mission serves something.",
+             "publish a port first, then: curl localhost:<port>  (`task` shows what to build)"),
+    "wget": ("🌍 `wget` downloads from a URL — but docker images don't come from URLs.",
+             "they come from a REGISTRY (Docker Hub): docker pull <image>"),
+    "python": ("🌍 `python` runs here only where a mission provides a script (like the RabbitMQ producer).",
+               "`task` shows what this mission actually needs"),
+    "python3": ("🌍 `python3` runs here only where a mission provides a script (like the RabbitMQ producer).",
+                "`task` shows what this mission actually needs"),
+    "pip": ("🌍 `pip` installs Python packages — in docker-land dependencies bake into IMAGES instead.",
+            "that's what a Dockerfile's `RUN pip install …` line is for (see the build missions)"),
+    "aws": ("🌍 the real `aws` CLI isn't simulated — the Terraform missions manage AWS the IaC way.",
+            "`quit` to the map and look for 🏗️ Terraform"),
+}
+for _img in ("ubuntu", "nginx", "alpine", "redis", "busybox"):
+    REAL_WORLD[_img] = (f"🌍 `{_img}` is an IMAGE — a packaged filesystem, not a command.",
+                        f"images are used THROUGH docker: docker pull {_img} → docker run {_img}")
+
+# Tools that ARE in the game, but live in other missions' handlers.
+MISSION_TOOLS = {
+    "helm": "the ⎈ Helm missions", "terraform": "the 🏗️ Terraform missions",
+    "ansible": "the 📜 Ansible missions", "ansible-playbook": "the 📜 Ansible missions",
+    "ansible-doc": "the 📜 Ansible missions", "argocd": "the 🔁 GitOps missions",
+    "rabbitmqctl": "the 📨 RabbitMQ mission",
+}
 
 
 # ----------------------------------------------------------------- mission --
@@ -1257,6 +1372,10 @@ def dispatch(world, line, io, mission):
             run_inside(world, world.inside, args, io)
         return True
 
+    if prog == "sudo" and rest:
+        io.print(c("(no sudo needed here — you're already root; running it anyway)", "dim"))
+        return dispatch(world, shlex.join(rest), io, mission)
+
     if prog == "docker":
         do_docker(world, rest, io)
     elif prog == "git":
@@ -1267,17 +1386,33 @@ def dispatch(world, line, io, mission):
         do_minikube(world, rest, io)
     elif prog == "docker-compose":
         _do_compose(world, rest, io)
-    elif prog in ("ls", "cat", "touch", "rm", "echo", "edit"):
+    elif prog in ("ls", "cat", "touch", "mkdir", "rm", "echo", "edit", "pwd", "whoami",
+                  "hostname", "clear", "date", "uname", "history"):
         do_host(world, prog, rest, io)
     elif prog == "ping":
         io.print("ping: works from INSIDE a container here — docker exec -it <name> bash, then ping <other>")
     elif prog in ("quit", "exit"):
         return False
+    elif any(re.search(rf"\b{re.escape(prog)}\b", pat) for pat, _fn in mission.get("handlers", [])):
+        # right tool for THIS mission, wrong form — encourage, don't wall
+        world.flags["_noop"] = True
+        io.print(f"`{prog}` is the right tool for this mission — that exact form just isn't wired up.")
+        io.print(c("   `hint` points at the next step · `task` re-shows the goal", "dim"))
+    elif prog in REAL_WORLD:
+        world.flags["_noop"] = True
+        head, follow = REAL_WORLD[prog]
+        io.print(head.format(cmd=prog))
+        io.print(c("   " + follow, "dim"))
+    elif prog in MISSION_TOOLS:
+        world.flags["_noop"] = True
+        io.print(f"🌍 `{prog}` IS in the game — it lives in {MISSION_TOOLS[prog]}. This mission doesn't use it.")
+        io.print(c("   `task` shows what THIS mission needs · `quit` returns to the map", "dim"))
     else:
+        world.flags["_noop"] = True
         known = ["docker", "git", "kubectl", "minikube", "helm", "terraform", "ansible",
                  "ansible-playbook", "argocd", "ls", "cat", "touch", "rm", "echo", "edit", "python"]
-        io.print(f"{prog}: command not found" + _suggest(prog, known))
-        io.print(c("`task` shows the goal · `hint` costs a little XP · `demo` shows it solved · `quit` leaves", "dim"))
+        io.print(f"`{prog}` isn't part of this simulated world (yet!)" + _suggest(prog, known))
+        io.print(c("   `help` lists everything that works here · `hint` nudges the next objective", "dim"))
     return True
 
 
@@ -1315,7 +1450,7 @@ def run_mission(mission, profile, io=None):
     io.print(c("═" * 62, "blue"))
     io.print(mission["brief"])
     io.print(c(f"\n📖 pairs with vault note: {mission.get('vault_note', '—')}", "dim"))
-    io.print(c("meta-commands: task · hint · demo (watch it solved!) · learn · quit\n", "dim"))
+    io.print(c("meta-commands: task · hint · demo (watch it solved!) · learn · help · quit\n", "dim"))
 
     def show_task():
         io.print(c("\n🎯 Objectives:", "bold"))
@@ -1354,6 +1489,15 @@ def run_mission(mission, profile, io=None):
             show_task(); continue
         if stripped == "learn":
             io.print(c(f"📖 Open your vault note: {mission.get('vault_note', '—')}", "cyan")); continue
+        if stripped == "help":
+            io.print(c("🧭 meta:  task (objectives) · hint (nudge, -5 XP) · demo (watch it solved) · "
+                       "learn (vault note) · quit (back to map)", "cyan"))
+            io.print(c("   tools: docker · git · kubectl · minikube — plus whatever the mission brings "
+                       "(helm/terraform/ansible/…)", "dim"))
+            io.print(c("   shell: ls · cat · touch · mkdir · rm · echo · edit <file> · pwd · whoami · "
+                       "clear · history", "dim"))
+            io.print(c("   type real commands — the world reacts like the real tools would", "dim"))
+            continue
         if stripped == "hint":
             pending = next((o for o in objectives if not o["done"]), None)
             if pending:
@@ -1361,11 +1505,19 @@ def run_mission(mission, profile, io=None):
                 xp_earned = max(0, xp_earned - 5)
                 io.print(c(f"💡 {pending['hint']}  (–5 XP)", "yellow"))
             continue
-        if stripped == "demo":
-            if user_cmds:
+        if stripped in ("demo", "demo!"):
+            if user_cmds and stripped == "demo":
                 io.print(c("🎬 demo replays the solution from a FRESH world — but you've already made moves.", "yellow"))
-                io.print(c("   quit and re-enter the mission to watch from the start (or keep going with `hint`)", "dim"))
+                io.print(c("   `demo!` resets the world and plays from the top (XP earned this run is cleared)", "dim"))
                 continue
+            if stripped == "demo!" and user_cmds:
+                world = World(mission.get("world"))
+                world.flags["repo_name"] = mission.get("repo_name", "repo")
+                for o in objectives:
+                    o["done"] = False
+                xp_earned, user_cmds = 0, 0
+                demo_sol = list(mission.get("solution", []))
+                io.print(c("🔄 fresh world — watching from the top", "magenta"))
             if not demo_sol:
                 io.print(c("this mission has no demo script", "yellow")); continue
             demo_used = True
@@ -1378,6 +1530,7 @@ def run_mission(mission, profile, io=None):
                     dispatch(world, cmd, _DemoFeed(io, demo_sol), mission)
                 except EOFError:
                     break
+                world.flags.pop("_noop", None)
                 check_objs(demo=True)
                 if all(o["done"] for o in objectives) or not demo_sol:
                     break
@@ -1399,8 +1552,11 @@ def run_mission(mission, profile, io=None):
                 return False, 0, hints_used
             continue
 
-        user_cmds += 1
-        if not dispatch(world, line, io, mission):
+        world.history.append(line.strip())
+        keep_playing = dispatch(world, line, io, mission)
+        if world.flags.pop("_noop", None) is None:
+            user_cmds += 1          # unrecognized/teach-only lines don't count as "moves"
+        if not keep_playing:
             io.print(c("left the mission — run it again anytime", "yellow"))
             return False, xp_earned, hints_used
 

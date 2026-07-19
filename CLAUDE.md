@@ -30,6 +30,7 @@ Runs every mission's embedded `solution` script and fails if any mission can't b
 - **Vault sync**: `save_profile` renders a markdown progress note into the player's Obsidian vault if `quest.config.json` (gitignored) points at one — see `--link-vault`. `sync_vault_note` must never raise into the game.
 - **Demo mode** (`demo` in a fresh mission) replays the `solution` step-by-step: Enter advances, `takeover` hands control back mid-run. Objectives completed during demo pay 0 XP and an all-demo run is never recorded — watching teaches, doing scores. Because `solution` doubles as the demo script, keep solutions clean and pedagogically ordered (inspect → act → verify), not just minimal.
 - Error messages should mimic the real tools' output (e.g. `denied: requested access to the resource is denied`) — the authenticity is the pedagogy. A dim parenthetical teaching hint after a realistic error is the house style.
+- **Unknown commands teach, never scold.** `REAL_WORLD` in `engine.py` maps common real-world commands (winget/apt/wsl/sudo/vim/image-names-as-commands/…) to a 🌍 micro-lesson explaining how the real tool maps to the sim; `MISSION_TOOLS` redirects tools that live in other missions. Teach-only/unknown responses set `world.flags["_noop"]` so they don't count as "moves" (and so `demo` stays available); a state-mutating command must never set it. `demo!` resets the world mid-mission to allow watching after moves. When adding a fallback error branch, set `_noop` there too.
 
 ## Adding a mission
 

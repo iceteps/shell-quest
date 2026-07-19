@@ -56,7 +56,12 @@ MISSIONS = [
         "vault_note": "Class 01 - Docker Basics",
         "brief": ("First day with Docker. Get the ubuntu image, start a container you can\n"
                   "work in, go INSIDE it, leave a file as proof you were there, and confirm\n"
-                  "the container is running. (Exactly what class did — from memory.)"),
+                  "the container is running. (Exactly what class did — from memory.)\n\n"
+                  "🌍 Real-world setup (already done for you here): Docker itself arrives via\n"
+                  "   Docker Desktop — GUI installer from docker.com, or a package manager\n"
+                  "   (winget/brew/apt). Once installed, 'downloading an image' is Docker's\n"
+                  "   own job, from the Docker Hub registry:\n"
+                  "   CLI: docker pull <image>   ·   GUI: Docker Desktop → search → Pull"),
         "world": {},
         "objectives": [
             {"desc": "Download the ubuntu image", "xp": 10,
@@ -77,7 +82,8 @@ MISSIONS = [
              "check": lambda w: w.flags.get("ps")},
         ],
         "teach": [
-            "Images download once and cache locally — `pull` fetches from a registry (Docker Hub by default).",
+            "Images download once and cache locally — `pull` fetches from a registry (Docker Hub by default). "
+            "Docker Desktop's GUI can pull too, but the CLI is the muscle worth building.",
             "-d runs detached (background); -it keeps an interactive terminal alive — bash would exit instantly without it.",
             "`exec` enters a RUNNING container; `run` would have created a brand-new one.",
             "A container's filesystem is its own little world — files you create live (and die) with it.",

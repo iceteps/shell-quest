@@ -41,8 +41,9 @@ Pick a mission from the map. In-mission meta-commands:
 |---|---|
 | `task` | re-show the objectives and your progress |
 | `hint` | a nudge for the next objective (costs 5 XP) |
-| `demo` | 🎬 **watch the mission solved step-by-step** — Enter advances, `takeover` hands you the keyboard mid-run. Watching pays no XP; doing does. |
+| `demo` | 🎬 **watch the mission solved step-by-step** — Enter advances, `takeover` hands you the keyboard mid-run. Watching pays no XP; doing does. Already made moves? `demo!` resets the world and plays from the top. |
 | `learn` | which study note this mission pairs with |
+| `help` | everything the simulated world understands (tools + shell basics) |
 | `quit` | leave the mission (no partial save) |
 
 Objectives check **state, not keystrokes** — any correct route wins. Finish a
@@ -52,6 +53,12 @@ Rookie → Tinkerer → Operator → Engineer → Senior → DevOps Legend.
 **Every objective teaches.** The moment you complete one, a 📚 one-liner tells
 you the *transferable concept* you just used — and finishing a mission prints a
 "what you just practiced" recap. Typos get a gentle *did-you-mean* nudge.
+
+**Wrong commands teach too.** Type `winget`, `apt`, `wsl`, `sudo`, `vim`, or an
+image name as if it were a command, and the game recognizes the real-world tool
+and explains 🌍 how it maps to this world — no cold "command not found" walls.
+The host shell also does the basics for real: `ls`, `cat`, `pwd`, `whoami`,
+`mkdir`, `clear`, `history`, and a tiny `edit <file>` editor.
 
 **New to a topic? The demo loop:** run the mission once with `demo` and just
 watch the commands and their real outputs; then replay it yourself for the XP.
