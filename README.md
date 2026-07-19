@@ -60,6 +60,14 @@ and explains 🌍 how it maps to this world — no cold "command not found" wall
 The host shell also does the basics for real: `ls`, `cat`, `pwd`, `whoami`,
 `mkdir`, `clear`, `history`, and a tiny `edit <file>` editor.
 
+**Check before you install — the game rewards the habit.** `docker --version`,
+`git --version`, and `which <tool>` answer like the real thing, so "is it
+already installed?" is always one command away. And nothing silently runs over
+existing state: re-pulling an image says *up to date*, `docker network create`
+on a taken name refuses, `kubectl create` on an existing object throws
+*AlreadyExists* (and explains why `apply` wouldn't), `git branch`/`checkout -b`
+on an existing branch fails exactly like real git.
+
 **New to a topic? The demo loop:** run the mission once with `demo` and just
 watch the commands and their real outputs; then replay it yourself for the XP.
 

@@ -174,6 +174,17 @@ def do_docker(world, args, io):
         return
     sub, rest = args[0], args[1:]
 
+    if sub in ("--version", "-v") and not rest:
+        world.flags["_noop"] = True
+        io.print("Docker version 26.1.4, build 5650f9b")
+        io.print(c("(the check-first habit — if this answers, Docker is installed; no reinstall needed)", "dim"))
+        return
+    if sub == "version" and not rest:
+        world.flags["_noop"] = True
+        io.print("Client:\n Version:      26.1.4\n API version:  1.45\n OS/Arch:      linux/amd64\n\n"
+                 "Server: Docker Desktop\n Engine:\n  Version:     26.1.4\n  OS/Arch:     linux/amd64")
+        return
+
     if sub == "compose":
         _do_compose(world, rest, io)
         return
@@ -183,8 +194,12 @@ def do_docker(world, args, io):
             io.print("docker pull: needs an image"); return
         img = world.norm_image(rest[0])
         io.print(f"{img.split(':')[1]}: Pulling from library/{img.split(':')[0]}")
-        io.print(f"Status: Downloaded newer image for {img}")
-        world.images.add(img)
+        if img in world.images:
+            io.print(f"Status: Image is up to date for {img}")
+            io.print(c("(already cached — pull is idempotent: checking costs nothing, nothing re-downloads)", "dim"))
+        else:
+            io.print(f"Status: Downloaded newer image for {img}")
+            world.images.add(img)
 
     elif sub == "images":
         io.print(f"{'REPOSITORY':<28}{'TAG':<12}SIZE")
@@ -272,6 +287,9 @@ def do_docker(world, args, io):
 
     elif sub == "network":
         if rest[:1] == ["create"] and len(rest) > 1:
+            if rest[1] in world.networks:
+                io.print(f"Error response from daemon: network with name {rest[1]} already exists")
+                return
             world.networks.add(rest[1]); io.print(_rand_id())
         elif rest[:1] == ["ls"]:
             io.print("NETWORK NAME")
@@ -898,9 +916,17 @@ def do_kubectl(world, args, io):
 
     elif sub == "create":
         if rest[:1] == ["namespace"] and len(rest) > 1:
+            if rest[1] in k["namespaces"]:
+                io.print(f'Error from server (AlreadyExists): namespaces "{rest[1]}" already exists')
+                io.print(c("(imperative `create` refuses to run over existing things — declarative `apply` converges instead)", "dim"))
+                return
             k["namespaces"].add(rest[1])
             io.print(f"namespace/{rest[1]} created")
         elif rest[:1] == ["deployment"] and len(rest) > 1:
+            if rest[1] in k["deployments"]:
+                io.print(f'Error from server (AlreadyExists): deployments.apps "{rest[1]}" already exists')
+                io.print(c("(imperative `create` refuses to run over existing things — declarative `apply` converges instead)", "dim"))
+                return
             img = next((a.split("=", 1)[1] for a in rest if a.startswith("--image=")), "nginx")
             k["deployments"][rest[1]] = {"ns": ns, "replicas": 1, "image": img,
                                          "revision": 1, "history": [img]}
@@ -1039,6 +1065,11 @@ def _has_markers(text):
 
 
 def do_git(world, args, io):
+    if args and args[0] in ("--version", "version") and len(args) == 1:
+        world.flags["_noop"] = True
+        io.print("git version 2.45.1")
+        io.print(c("(check-first: a version answer = the tool is installed and on PATH)", "dim"))
+        return
     g = world.git
     if g is None:
         io.print("This mission has no git world — try `task`.")
@@ -1123,6 +1154,10 @@ def do_git(world, args, io):
             for b in sorted(g["branches"]):
                 io.print(("* " if b == g["branch"] else "  ") + b)
         else:
+            if rest[0] in g["branches"]:
+                io.print(f"fatal: a branch named '{rest[0]}' already exists")
+                io.print(c("(check-first: plain `git branch` lists what exists before you create)", "dim"))
+                return
             g["branches"].add(rest[0])
             io.print(c(f"(created branch '{rest[0]}' — switch to it with checkout/switch)", "dim"))
 
@@ -1134,6 +1169,10 @@ def do_git(world, args, io):
             io.print(f"usage: git {sub} <branch>"); return
         target = rest[0]
         if create:
+            if target in g["branches"]:
+                io.print(f"fatal: a branch named '{target}' already exists")
+                io.print(c(f"(it exists — just switch to it: git {sub} {target})", "dim"))
+                return
             g["branches"].add(target)
         if target not in g["branches"]:
             io.print(f"error: pathspec '{target}' did not match any branch"); return
@@ -1241,8 +1280,32 @@ def do_host(world, prog, args, io):
     elif prog == "history":
         for i, cmd in enumerate(world.history, 1):
             io.print(f"  {i}  {cmd}")
+    elif prog in ("which", "where", "command"):
+        world.flags["_noop"] = True
+        target = next((a for a in args if not a.startswith("-")), None)
+        if not target:
+            io.print(f"usage: {prog} <command>")
+            return
+        on_path = {"docker", "git", "kubectl", "minikube", "docker-compose", "helm", "terraform",
+                   "ansible", "ansible-playbook", "ansible-doc", "argocd", "python", "python3",
+                   "pip", "curl", "bash", "sh", "ls", "cat", "touch", "mkdir", "rm", "echo", "edit"}
+        if target in on_path:
+            io.print(f"/usr/bin/{target}")
+            io.print(c("(on PATH = installed — the check to run BEFORE any install step)", "dim"))
+        else:
+            io.print(f"{prog}: no {target} in (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin)")
+            if target in REAL_WORLD:
+                io.print(c(f"(not on this Linux-ish host — type `{target}` by itself to see how it maps here)", "dim"))
+        if prog == "where":
+            io.print(c("(`where` is the Windows spelling — on Linux the habit is `which`)", "dim"))
     elif prog == "mkdir" and args:
-        files[args[-1].rstrip("/") + "/"] = ""
+        target = args[-1]
+        key = target.rstrip("/") + "/"
+        if key in files and "-p" not in args:
+            io.print(f"mkdir: cannot create directory '{target}': File exists")
+            io.print(c("(-p makes mkdir idempotent: create if missing, quiet if it already exists)", "dim"))
+        else:
+            files[key] = ""
     elif prog == "cat":
         if not args:
             io.print("cat: needs a file"); return
@@ -1387,7 +1450,7 @@ def dispatch(world, line, io, mission):
     elif prog == "docker-compose":
         _do_compose(world, rest, io)
     elif prog in ("ls", "cat", "touch", "mkdir", "rm", "echo", "edit", "pwd", "whoami",
-                  "hostname", "clear", "date", "uname", "history"):
+                  "hostname", "clear", "date", "uname", "history", "which", "where", "command"):
         do_host(world, prog, rest, io)
     elif prog == "ping":
         io.print("ping: works from INSIDE a container here — docker exec -it <name> bash, then ping <other>")

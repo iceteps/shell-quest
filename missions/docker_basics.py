@@ -59,8 +59,10 @@ MISSIONS = [
                   "the container is running. (Exactly what class did — from memory.)\n\n"
                   "🌍 Real-world setup (already done for you here): Docker itself arrives via\n"
                   "   Docker Desktop — GUI installer from docker.com, or a package manager\n"
-                  "   (winget/brew/apt). Once installed, 'downloading an image' is Docker's\n"
-                  "   own job, from the Docker Hub registry:\n"
+                  "   (winget/brew/apt). Already have it? Check BEFORE installing:\n"
+                  "   `docker --version` answering means you're set — a reinstall can run\n"
+                  "   over a working setup. 'Downloading an image' is then Docker's own job,\n"
+                  "   from the Docker Hub registry:\n"
                   "   CLI: docker pull <image>   ·   GUI: Docker Desktop → search → Pull"),
         "world": {},
         "objectives": [
@@ -90,6 +92,7 @@ MISSIONS = [
             "`docker ps` = running only; add -a and stopped containers appear too.",
         ],
         "solution": [
+            "docker --version",
             "docker pull ubuntu:latest",
             "docker run -dit --name devops1 ubuntu bash",
             "docker exec -it devops1 bash",
