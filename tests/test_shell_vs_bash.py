@@ -134,6 +134,21 @@ ORDER_FREE = {
     "tar create list", "tar czf", "ls -R",
 }
 
+# Sorting order is a LOCALE fact. The game models a desktop, where glibc
+# collates like a dictionary (`alpha` before `Beta`). A bare-C-locale box — a CI
+# runner, typically — collates by codepoint instead. Same shell, different
+# environment question, so these are waived there rather than "fixed" to match a
+# locale no student is sitting in.
+COLLATION_SENSITIVE = {
+    "sort mixed case", "sort punctuation ignored", "ls collates like sort",
+}
+
+
+def collates_by_dictionary():
+    out, _ = run_bash(["printf 'alpha\\nBeta\\n' | sort"])
+    return out.split() == ["alpha", "Beta"]
+
+
 # Cases whose output legitimately depends on the machine, not on behaviour.
 ENV_SPECIFIC = {
     "subst in double quotes", "subst backticks", "subst nested",
@@ -511,10 +526,15 @@ def main():
     # An ENV_SPECIFIC name that no longer matches a case is a waiver for
     # nothing — and the next case renamed into that slot would be exempted
     # by accident. Fail loudly instead.
-    stale = sorted((ENV_SPECIFIC | ORDER_FREE) - set(CASES))
+    stale = sorted((ENV_SPECIFIC | ORDER_FREE | COLLATION_SENSITIVE) - set(CASES))
     if stale:
         print("stale waiver entries (no such case): " + ", ".join(stale))
         return 1
+    if not collates_by_dictionary():
+        print("note: this machine's bash collates by codepoint (C locale), so the "
+              f"{len(COLLATION_SENSITIVE)} sort-order cases are treated as "
+              "environment-specific here.")
+        ENV_SPECIFIC.update(COLLATION_SENSITIVE)
     failures, env_only, ran = [], 0, 0
     for name, cmds in CASES.items():
         if only and only not in name:
