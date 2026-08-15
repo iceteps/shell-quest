@@ -78,6 +78,17 @@ dialect of the OS you picked. No cold "command not found" walls.
 The host shell also does the basics for real: `ls`, `cat`, `pwd`, `whoami`,
 `mkdir`, `clear`, `history`, and a tiny `edit <file>` editor.
 
+**The 🐧 Linux missions run a real shell.** Not a lookup table of blessed commands —
+a tokenizer with bash's quoting rules, brace expansion (`file{1,2,3}.txt`), globs,
+pipes, `>` `>>` `<` `2>`, `;` `&&` `||`, exit codes and `$?`, a working directory,
+permission bits, background jobs. It is held to that standard mechanically:
+`tests/test_shell_vs_bash.py` runs ~150 cases through **both** the simulated shell
+and your machine's real bash and fails on any divergence — and it runs in CI.
+
+Where a faithful simulation isn't possible, it says so instead of faking it. Type
+`sleep 300` without `&` and it tells you real bash would have blocked your terminal
+for five minutes — which is the entire reason `&` exists.
+
 **Check before you install — the game rewards the habit.** `docker --version`,
 `git --version`, and `which <tool>` answer like the real thing, so "is it
 already installed?" is always one command away. And nothing silently runs over
@@ -145,7 +156,8 @@ lands in a commit. Delete the file to start fresh.
 Every mission ships with a solution script. This proves all of them are completable:
 
 ```bash
-python quest.py --selftest
+python quest.py --selftest              # every mission is completable
+python tests/test_shell_vs_bash.py      # the Linux shell agrees with real bash
 ```
 
 ## Also in this repo: ⚡ the quick quiz

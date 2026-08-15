@@ -17,7 +17,15 @@ A terminal learning game for a DevOps course: students type **real** `docker`/`g
 python quest.py --selftest
 ```
 
-Runs every mission's embedded `solution` script and fails if any mission can't be completed. **Run it after ANY change to engine or missions — a PR/commit with a failing selftest is broken.** There is no other test suite; the selftest is the CI.
+Runs every mission's embedded `solution` script and fails if any mission can't be completed. **Run it after ANY change to engine or missions — a PR/commit with a failing selftest is broken.**
+
+The second one, for anything touching the 🐧 Linux shell:
+
+```bash
+python tests/test_shell_vs_bash.py
+```
+
+Runs ~150 command cases through both the simulated shell and the machine's **real bash**, and fails on any divergence. Both run in CI. Note what the selftest does NOT prove: it only replays winning solutions, so it says a mission is *completable*, never that it is *pleasant*. Wrong commands, meta-commands and quitting are a separate pass — play the mission by hand before shipping it.
 
 ## How the game works (design rules)
 
@@ -42,14 +50,23 @@ Runs every mission's embedded `solution` script and fails if any mission can't b
   `print_setup()` / `SETUP_STEPS` hold the real install commands per OS — keep them accurate,
   they are commands people paste. When adding real-world guidance anywhere, ask "is this true
   on all three?" — if not, it belongs in a `pick({...})`.
-- **`missions/linux_basics.py` carries its own shell**, deliberately. The engine's host world
-  is one flat folder with no cwd, permissions or processes — right for docker/k8s, wrong for
-  Linux. Rather than reshape a world 16 missions depend on, that module registers a catch-all
-  `(r".+", _shell)` handler (handlers dispatch before generic dispatch) and implements cwd,
-  a directory set, mode bits, processes, pipes and redirection over `world.files` +
-  `world.flags`. Anything it doesn't know falls back to the shared `REAL_WORLD` atlas, so the
-  teach-don't-scold rule still holds. Extend that module for Linux behaviour; don't push it
-  into `engine.py` unless a non-Linux mission needs it too.
+- **`missions/linux_shell.py` is a real shell, and it is held to bash's behaviour.** The
+  engine's host world is one flat folder with no cwd, permissions or processes — right for
+  docker/k8s, wrong for Linux. Rather than reshape a world 16 missions depend on, the Linux
+  missions register a catch-all `(r"(?!(?:quit|exit)\s*$).+", shell)` handler (handlers
+  dispatch first; `quit`/`exit` must fall through or the player is trapped) and run that
+  module: tokenizer with bash's quoting/escaping rules, brace expansion, globbing, pipes,
+  `> >> < 2>`, `; && ||`, exit codes, cwd, mode bits, processes, cron and tar over
+  `world.files` + `world.flags`. Every builtin returns `Res(out, err, code)` so redirection
+  and chaining compose. `missions/linux_basics.py` holds only mission data.
+  **The bar is behavioural honesty, not feature count.** `tests/test_shell_vs_bash.py` runs
+  ~150 cases through BOTH this shell and the machine's real bash and fails on any divergence
+  — it runs in CI next to the selftest. Add a case there for anything you touch. Where a
+  faithful simulation isn't possible (a command that would block, a tool that isn't
+  installed), say so in the shell's voice rather than faking success — e.g. foreground
+  `sleep` explains that real bash blocks instead of silently backgrounding, which is the
+  whole point of teaching `&`. Deliberate omissions (documented in the module docstring):
+  no `$(command)` — the cron lesson needs `$(date)` to stay literal — and no awk/sed.
 - **Prerequisite realism — check-first works, already-exists refuses.** Version checks (`docker --version`/`version`, `git --version`, `which`/`where`) answer like real tools and are `_noop` (pure inspection). Existing state is never silently run over: repeat `docker pull` → *Image is up to date*, duplicate `docker network create` → daemon error, `kubectl create` on existing → *AlreadyExists* + apply-vs-create hint, duplicate `git branch`/`checkout -b` → *fatal: already exists*, `mkdir` on existing → *File exists* (`-p` stays quiet). When simulating a new command, model the real tool's already-exists behavior, not just its happy path.
 
 ## Adding a mission

@@ -15,3 +15,8 @@ jobs:
           python-version: "3.12"
       - name: lint + prove every mission is completable
         run: python quest.py --selftest
+
+      # The Linux missions claim the world reacts like the real tools do. This
+      # runs every case against the runner's own bash and fails on any drift.
+      - name: the simulated shell must agree with real bash
+        run: python tests/test_shell_vs_bash.py
