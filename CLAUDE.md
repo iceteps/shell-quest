@@ -55,18 +55,32 @@ Runs ~150 command cases through both the simulated shell and the machine's **rea
   docker/k8s, wrong for Linux. Rather than reshape a world 16 missions depend on, the Linux
   missions register a catch-all `(r"(?!(?:quit|exit)\s*$).+", shell)` handler (handlers
   dispatch first; `quit`/`exit` must fall through or the player is trapped) and run that
-  module: tokenizer with bash's quoting/escaping rules, brace expansion, globbing, pipes,
-  `> >> < 2>`, `; && ||`, exit codes, cwd, mode bits, processes, cron and tar over
-  `world.files` + `world.flags`. Every builtin returns `Res(out, err, code)` so redirection
-  and chaining compose. `missions/linux_basics.py` holds only mission data.
+  module: tokenizer with bash's quoting/escaping rules, a `check_syntax()` parser pass that
+  REJECTS `echo hi |` / `;;` / a leading `|` the way bash does, brace expansion, globbing
+  (dotfiles hidden unless the pattern leads with `.`; a trailing `/` means directories only),
+  pipes (`|` and `|&`), `> >> < 2> 2>&1 1>&2`, `; && ||`, exit codes, cwd, mode bits that
+  actually deny reads, processes, cron and tar over `world.files` + `world.flags`.
+  `missions/linux_basics.py` holds only mission data.
+  - Every builtin returns `Res(out, err, code, nonl)`. `out` is the stream minus at most one
+    trailing newline and `nonl` says whether that newline was there — that is what makes
+    `wc -c` honest about `echo a > f` (2) vs `printf a > f` (1). Use `stream(text)` to build
+    a Res from raw bytes.
+  - `run_line(world, io, line)` is the single entry point for one command line, and
+    `run_script()` feeds a script's lines through it — so `exit 3`, `$1`, pipes and
+    redirection inside a script behave exactly as at the prompt. `shell()` is a thin wrapper.
+  - `sort`/`ls`/globs order with `collate()` (glibc dictionary collation), not codepoints.
+    `Gamma` after `alpha` is what the student's terminal shows.
   **The bar is behavioural honesty, not feature count.** `tests/test_shell_vs_bash.py` runs
-  ~150 cases through BOTH this shell and the machine's real bash and fails on any divergence
-  — it runs in CI next to the selftest. Add a case there for anything you touch. Where a
-  faithful simulation isn't possible (a command that would block, a tool that isn't
-  installed), say so in the shell's voice rather than faking success — e.g. foreground
-  `sleep` explains that real bash blocks instead of silently backgrounding, which is the
-  whole point of teaching `&`. Deliberate omissions (documented in the module docstring):
-  no `$(command)` — the cron lesson needs `$(date)` to stay literal — and no awk/sed.
+  ~285 cases through BOTH this shell and the machine's real bash and fails on any divergence
+  — it runs in CI next to the selftest. Add a case there for anything you touch. Two waiver
+  sets exist and both are linted against `CASES` (a stale name fails the run): `ENV_SPECIFIC`
+  for machine facts, `ORDER_FREE` for output whose order the filesystem doesn't define
+  (`find`, `tar -t`). Where a faithful simulation isn't possible (a command that would block,
+  a tool that isn't installed), say so in the shell's voice rather than faking success — e.g.
+  foreground `sleep` explains that real bash blocks instead of silently backgrounding, which
+  is the whole point of teaching `&`. Deliberate omissions (documented in the module
+  docstring): `$(…)` only wraps side-effect-free commands, no awk/sed, and `&` backgrounds
+  only at the end of a line.
 - **Prerequisite realism — check-first works, already-exists refuses.** Version checks (`docker --version`/`version`, `git --version`, `which`/`where`) answer like real tools and are `_noop` (pure inspection). Existing state is never silently run over: repeat `docker pull` → *Image is up to date*, duplicate `docker network create` → daemon error, `kubectl create` on existing → *AlreadyExists* + apply-vs-create hint, duplicate `git branch`/`checkout -b` → *fatal: already exists*, `mkdir` on existing → *File exists* (`-p` stays quiet). When simulating a new command, model the real tool's already-exists behavior, not just its happy path.
 
 ## Adding a mission

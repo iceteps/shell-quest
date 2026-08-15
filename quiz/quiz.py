@@ -15,6 +15,7 @@ Run:
 import argparse
 import os
 import random
+import re
 import sys
 
 # --- make ANSI colours work on Windows 10+ terminals ---
@@ -259,6 +260,47 @@ TOPIC_NAMES = {
 }
 
 
+# Free-text answers come in two shapes: a COMMAND to type, and a CONCEPT/value to
+# name. They must be graded differently — a command has to actually start with the
+# right command, while a concept may sit inside a sentence.
+CMD_HEADS = {
+    "docker", "git", "kubectl", "helm", "ansible", "ansible-playbook", "ansible-doc",
+    "terraform", "argocd", "rabbitmqctl", "minikube", "find", "ping", "tar", "ls",
+    "chmod", "chown", "grep", "ps", "kill", "df", "du", "ip", "crontab", "gzip",
+    "gunzip", "cat", "mkdir", "touch", "cp", "mv", "rm", "which", "systemctl",
+}
+
+
+def _norm(s):
+    """Whitespace and trailing punctuation are not answers."""
+    return re.sub(r"\s+", " ", s.strip().lower()).strip(" .;,!?")
+
+
+def is_command_answer(q):
+    return _norm(q["accept"][0]).split()[0] in CMD_HEADS
+
+
+def grade_text(reply, accept, command):
+    """A substring test would pass "no idea, maybe git status?" — and "rm -rf /;
+    git status". Commands must BE the answer (extra flags welcome); concepts may
+    appear as a whole word in a sentence."""
+    r = _norm(reply)
+    if not r:
+        return False
+    for raw in accept:
+        a = _norm(raw)
+        if not a:
+            continue
+        if r == a:
+            return True
+        if command:
+            if r.startswith(a + " "):      # `git status -s` still answers `git status`
+                return True
+        elif re.search(rf"(?<!\w){re.escape(a)}(?!\w)", r):
+            return True
+    return False
+
+
 def ask(q, idx, total):
     print(c(f"\n[{idx}/{total}] ", "dim") + c(TOPIC_NAMES.get(q["topic"], q["topic"]), "magenta"))
     print(c(q["q"], "bold"))
@@ -276,11 +318,13 @@ def ask(q, idx, total):
             return order[letters.index(reply[0])] == q["answer"]
         return False
     else:
+        command = is_command_answer(q)
+        prompt = "\n> type the command: " if command else "\n> your answer: "
         try:
-            reply = input(c("\n> type the command: ", "yellow")).strip().lower()
+            reply = input(c(prompt, "yellow")).strip()
         except (EOFError, KeyboardInterrupt):
             return None
-        return any(a in reply for a in q["accept"]) and len(reply) > 0
+        return grade_text(reply, q["accept"], command)
 
 
 def rank(pct):

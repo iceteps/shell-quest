@@ -9,6 +9,7 @@
     python quest.py --link-vault <file>  write live progress into an Obsidian note
     python quest.py --sync-vault         re-render the vault progress note now
 """
+import os
 import sys
 
 from engine import (IO, OS_NAMES, c, detect_os, level, load_config, load_profile,
@@ -209,12 +210,43 @@ def lint():
                 _re.compile(pattern)
             except _re.error as e:
                 problems.append(f"{mid}: bad handler regex {pattern!r}: {e}")
+    problems += lint_quiz()
     if problems:
         print(c(f"LINT: {len(problems)} problem(s)", "red"))
         for p in problems:
             print(c(f"  ✗ {p}", "red"))
         sys.exit(1)
     print(c(f"LINT: {len(ALL_MISSIONS)} missions structurally OK ✔\n", "green"))
+
+
+def lint_quiz():
+    """The quiz lives in the same repo and ships in the same commits. The one
+    thing that can silently rot is grading: every answer the quiz PRINTS as
+    accepted must actually be accepted by the grader."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quiz", "quiz.py")
+    if not os.path.exists(path):
+        return []
+    spec = importlib.util.spec_from_file_location("_quiz_lint", path)
+    quiz = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(quiz)
+    problems, topics = [], set()
+    for q in quiz.QUESTIONS:
+        topics.add(q.get("topic"))
+        if q.get("topic") not in quiz.TOPIC_NAMES:
+            problems.append(f"quiz: topic '{q.get('topic')}' missing from TOPIC_NAMES")
+        if "options" in q:
+            if not isinstance(q.get("answer"), int) or not 0 <= q["answer"] < len(q["options"]):
+                problems.append(f"quiz: answer index out of range — {q['q'][:48]}")
+            continue
+        if not q.get("accept"):
+            problems.append(f"quiz: no options and no accept — {q['q'][:48]}")
+            continue
+        cmd = quiz.is_command_answer(q)
+        for a in q["accept"]:
+            if not quiz.grade_text(a, q["accept"], cmd):
+                problems.append(f"quiz: grader rejects its own answer {a!r} — {q['q'][:48]}")
+    return problems
 
 
 def selftest():
@@ -273,8 +305,26 @@ def set_os_cli(name):
     print(c("Run `python quest.py --setup` to see the install steps for it.", "dim"))
 
 
+FLAGS = ("--selftest", "--os", "--setup", "--catchup", "--link-vault", "--sync-vault",
+         "--help", "-h")
+
+
+def usage(stream_note=""):
+    print(__doc__.rstrip())
+    if stream_note:
+        print(c("\n" + stream_note, "yellow"))
+
+
 if __name__ == "__main__":
-    if "--selftest" in sys.argv:
+    # A mistyped flag must not silently drop you into the game — you'd never
+    # notice that --setup didn't run. Anything unrecognised gets the usage text.
+    unknown = [a for a in sys.argv[1:] if a.startswith("-") and a not in FLAGS]
+    if "--help" in sys.argv or "-h" in sys.argv:
+        usage()
+    elif unknown:
+        usage(f"unknown option: {unknown[0]}")
+        sys.exit(2)
+    elif "--selftest" in sys.argv:
         selftest()
     elif "--os" in sys.argv:
         i = sys.argv.index("--os")

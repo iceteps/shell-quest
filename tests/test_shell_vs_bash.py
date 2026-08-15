@@ -64,11 +64,16 @@ def normalise(text, sandbox=None, real_user=None):
     # ls -l: SELinux context dot, link counts, block totals and timestamps are
     # machine facts, not behaviour.
     text = re.sub(r"^(total) \d+", r"\1 N", text, flags=re.M)
-    text = re.sub(r"([-drwx]{10})\.", r"\1", text)
-    text = re.sub(r"([-drwx]{10}) +\d+ ", r"\1 1 ", text)
+    text = re.sub(r"([-drwxsStT]{10})\.", r"\1", text)
+    text = re.sub(r"([-drwxsStT]{10}) +\d+ ", r"\1 1 ", text)
+    # A directory's byte size is the filesystem's business, not the shell's.
+    text = re.sub(r"^(d[-rwxsStT]{9} 1 \S+ +\S+) +\d+ ", r"\1 SIZE ", text, flags=re.M)
     text = re.sub(r"\b\d{4}-\d\d-\d\d \d\d:\d\d\b", "DATE", text)
     text = re.sub(r"\b[A-Z][a-z]{2} +\d+ +[\d:]+\b", "DATE", text)
     text = re.sub(r"^bash: (?:-c: )?line \d+: ", "bash: ", text, flags=re.M)
+    # `bash -c` echoes the offending line back after a syntax error; an
+    # INTERACTIVE bash (which is what the game is) does not. Harness artifact.
+    text = re.sub(r"^bash: `.*'$\n?", "", text, flags=re.M)
     text = text.replace("\u2018", "'").replace("\u2019", "'")
     keep = []
     for line in text.split("\n"):
@@ -95,21 +100,45 @@ def run_simulated(cmds):
 
 
 def run_bash(cmds):
-    sandbox = tempfile.mkdtemp(prefix="shellquest-diff-")
+    # The sandbox lives inside a parent whose mode we control, so `ls -la`'s
+    # `..` row is a fact about the test and not about the machine's /tmp.
+    parent = os.path.join(tempfile.gettempdir(), "shellquest-diff")
+    os.makedirs(parent, exist_ok=True)
+    os.chmod(parent, 0o755)
+    sandbox = tempfile.mkdtemp(prefix="run-", dir=parent)
+    os.chmod(sandbox, 0o755)          # mkdtemp gives 0700; the game's HOME is 755
     try:
         script = f"cd {sandbox}\n" + "\n".join(cmds)
+        # stderr merged into stdout on the SAME fd, not concatenated after it:
+        # the game prints one interleaved stream, so comparing two separate
+        # streams would flag ordering that is an artifact of the harness.
+        # HOME points at the sandbox so `$HOME` and a bare `cd` are comparable
+        # with the game's own HOME rather than being unaskable questions.
+        env = dict(os.environ, HOME=sandbox)
+        # No stdin: a case that reads the keyboard must fail fast, not hang CI.
         proc = subprocess.run(["bash", "--noprofile", "--norc", "-c", script],
-                              capture_output=True, text=True, timeout=30)
-        return proc.stdout + proc.stderr, sandbox
+                              stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, timeout=30, env=env)
+        return proc.stdout, sandbox
     finally:
         shutil.rmtree(sandbox, ignore_errors=True)
 
 
+# `find` and `tar -t` walk in readdir order, which real filesystems do not
+# define. Comparing those outputs as ordered text would be testing ext4, not the
+# shell — so for these the LINES must match, in any order.
+ORDER_FREE = {
+    "find bare", "find -name", "find -type f", "find -type d", "find -iname",
+    "find -maxdepth", "find -maxdepth -type f", "find piped to wc",
+    "tar create list", "tar czf", "ls -R",
+}
+
 # Cases whose output legitimately depends on the machine, not on behaviour.
 ENV_SPECIFIC = {
     "subst in double quotes", "subst backticks", "subst nested",
-    "uname", "uname -r", "uname -a", "whoami", "id", "df -h", "df raw",
-    "date", "hostname", "cd no args", "var in double quotes",
+    "uname", "uname -r", "whoami", "df -h",
+    "cd no args", "var in double quotes",
     "echo double quotes var", "unmatched quote", "ls -la combined",
     "ls -l -a separate", "chain ||",
 }
@@ -218,6 +247,10 @@ CASES = {
     "find -iname": ["touch A.TXT", "find . -iname '*.txt'"],
     "find -name no arg": ["find . -name"],
     "find missing dir": ["find nope"],
+    "find -maxdepth": ["mkdir -p d/e", "touch a.txt d/b.txt", "find . -maxdepth 1"],
+    "find -maxdepth -type f": ["mkdir -p d", "touch a.txt d/b.txt",
+                               "find . -maxdepth 1 -type f"],
+    "find piped to wc": ["mkdir -p d", "touch a.txt d/b.txt", "find . -name '*.txt' | wc -l"],
 
     # ---- permissions ---------------------------------------------------
     "chmod 600 then ls -l": ["touch f", "chmod 600 f", "ls -l f"],
@@ -293,6 +326,180 @@ CASES = {
     "script needs +x": ["printf '#!/bin/bash\\necho hi\\n' > s.sh", "./s.sh"],
     "script with +x": ["printf '#!/bin/bash\\necho hi\\n' > s.sh", "chmod +x s.sh", "./s.sh"],
     "bash script no +x": ["printf '#!/bin/bash\\necho hi\\n' > s.sh", "bash s.sh"],
+
+    # ---- the parser says no ------------------------------------------------
+    # Silently dropping an empty command would teach that these lines are fine.
+    # They are the classic beginner typos, and bash rejects every one of them.
+    "pipe at start": ["| echo hi"],
+    "pipe at end": ["echo hi |"],
+    "double pipe empty middle": ["echo a | | cat"],
+    "and at end": ["echo a &&"],
+    "or at end": ["echo a ||"],
+    "semicolon alone": [";"],
+    "double semicolon": ["echo a ;;"],
+    "and at start": ["&& echo a"],
+    "semicolon then pipe": ["echo a ; | cat"],
+    "trailing semicolon is legal": ["echo a ;"],
+    "empty chain between semicolons": ["echo a ;; echo b"],
+    "redirect target is operator": ["echo a > > b"],
+    "redirect with no target": ["echo hi >"],
+    "quoted pipe is not an operator": ["echo 'a | b'"],
+    "quoted semicolon is not an operator": ["echo 'a ; b'"],
+    "pipe stderr merge": ["ls nope |& wc -l"],
+    "plain pipe does not carry stderr": ["ls nope | wc -l"],
+
+    # ---- echo / printf are builtins with real flag rules -------------------
+    "echo -n": ["echo -n hi"],
+    "echo -e": ["echo -e 'a\\tb'"],
+    "echo -ne": ["echo -ne 'a\\nb'"],
+    "echo -E keeps backslashes": ["echo -E 'a\\nb'"],
+    "echo flag stops at first word": ["echo hi -n"],
+    "echo escaped dollar": ["echo \\$HOME"],
+    "echo escaped star": ["touch a.txt", "echo \\*"],
+    "echo escaped dollar keeps glob": ["touch x1", "echo \\$x*"],
+    "printf format reuse": ["printf '%s\\n' a b c"],
+    "printf two slots": ["printf '%s-%s\\n' a b c d"],
+    "printf percent literal": ["printf '100%%\\n'"],
+    # Not tested across two typed lines: `bash -c` runs a SCRIPT, so an
+    # unterminated printf runs into the next command's output. An interactive
+    # shell (which the game is) puts a prompt there instead. The byte count is
+    # the part that is the same either way — and it's what actually bites.
+    "printf writes no trailing newline": ["printf 'a' > f", "wc -c f"],
+    "echo writes a trailing newline": ["echo a > f", "wc -c f"],
+    "echo -n writes no trailing newline": ["echo -n a > f", "wc -c f"],
+    "append does not insert a separator": ["printf 'a' > f", "printf 'b\\n' >> f",
+                                           "cat f", "wc -c f"],
+    "cat keeps the missing newline": ["printf 'a' > f", "cat f | wc -c"],
+    "printf digit": ["printf '%d\\n' 42"],
+
+    # ---- ls -d: the directory itself ---------------------------------------
+    "ls -d dir": ["mkdir d", "touch d/f", "ls -d d"],
+    "ls -ld dir": ["mkdir d", "chmod 755 d", "ls -ld d"],
+    "ls -ld after chmod 700": ["mkdir d", "chmod 700 d", "ls -ld d"],
+    "ls -d file": ["touch f", "ls -d f"],
+
+    # ---- grep is a REGEX tool, not a substring test -------------------------
+    "grep anchor start": ["printf 'alpha\\nbeta\\n' > f", "grep '^a' f"],
+    "grep anchor end": ["printf 'alpha\\nbeta\\n' > f", "grep 'a$' f"],
+    "grep dot": ["printf 'cat\\ncot\\ncart\\n' > f", "grep 'c.t' f"],
+    "grep star": ["printf 'ct\\ncat\\ncaat\\n' > f", "grep 'ca*t' f"],
+    "grep class": ["printf 'a1\\nb2\\n' > f", "grep '[0-9]' f"],
+    "grep negated class": ["printf 'a1\\nbb\\n' > f", "grep '[^0-9]$' f"],
+    "grep BRE plus is literal": ["printf 'a+b\\naab\\n' > f", "grep 'a+b' f"],
+    "grep -E plus is an operator": ["printf 'a+b\\naab\\n' > f", "grep -E 'a+b' f"],
+    "grep -F fixed": ["printf 'a.b\\naxb\\n' > f", "grep -F 'a.b' f"],
+    "grep -l": ["echo hit > a", "echo no > b", "grep -l hit a b"],
+    "grep -l no match": ["echo no > a", "grep -l hit a"],
+    "grep -w": ["printf 'cat\\ncatalog\\n' > f", "grep -w cat f"],
+    "grep -q sets status only": ["echo hi > f", "grep -q hi f", "echo $?"],
+    "grep -q miss status": ["echo hi > f", "grep -q nope f", "echo $?"],
+    "grep unterminated class": ["echo a > f", "grep '[' f"],
+    "grep -v no trailing blank": ["printf 'a\\nb\\n' > f", "grep -v a f | wc -l"],
+
+    # ---- sort collates like a dictionary, not like ASCII --------------------
+    "sort mixed case": ["printf 'beta\\nAlpha\\ngamma\\n' > f", "sort f"],
+    "sort punctuation ignored": ["printf '_x\\nb\\n-y\\n' > f", "sort f"],
+    "sort piped to head": ["printf 'c\\na\\nb\\n' > f", "sort f | head -n 1"],
+    "sort -r": ["printf 'beta\\nAlpha\\ngamma\\n' > f", "sort f | wc -l"],
+    "ls collates like sort": ["touch Beta alpha Gamma", "ls"],
+
+    # ---- basename / dirname ------------------------------------------------
+    "basename": ["basename /a/b/c.txt"],
+    "basename suffix": ["basename /a/b/c.txt .txt"],
+    "basename trailing slash": ["basename /a/b/"],
+    "dirname": ["dirname /a/b/c.txt"],
+    "dirname bare": ["dirname c.txt"],
+
+    # ---- sudo is a no-op here, but it must still RUN the command -----------
+    # (no bash side: real sudo would prompt for a password)
+
+    # ---- permission bits have to actually STOP things ----------------------
+    "chmod 000 blocks cat": ["echo hi > f", "chmod 000 f", "cat f", "echo $?"],
+    "chmod 000 blocks grep": ["echo hi > f", "chmod 000 f", "grep hi f"],
+    "chmod 000 blocks wc": ["echo hi > f", "chmod 000 f", "wc -l f"],
+    "chmod 000 blocks stdin redirect": ["echo hi > f", "chmod 000 f", "cat < f"],
+    "chmod 400 still reads": ["echo hi > f", "chmod 400 f", "cat f"],
+    "setuid shows as s": ["touch f", "chmod 4755 f", "ls -l f"],
+    "setgid shows as s": ["touch f", "chmod 2755 f", "ls -l f"],
+    "sticky shows as t": ["mkdir d", "chmod 1755 d", "ls -ld d"],
+    "capital S when not executable": ["touch f", "chmod 4644 f", "ls -l f"],
+
+    # ---- descriptor duplication --------------------------------------------
+    "2>&1 to stdout": ["ls nope 2>&1"],
+    "2>&1 into a pipe": ["ls nope 2>&1 | wc -l"],
+    "2>&1 with a file": ["ls nope > out 2>&1", "cat out"],
+    "1>&2 sends stdout to stderr": ["echo hi 1>&2"],
+
+    # ---- globbing rules ----------------------------------------------------
+    "glob skips dotfiles": ["touch .hidden a", "echo *"],
+    "glob dot pattern finds them": ["touch .hidden", "echo .*"],
+    "glob trailing slash is dirs only": ["mkdir d", "touch f", "echo */"],
+    "ls -d trailing slash glob": ["mkdir d", "touch f", "ls -d */"],
+    "glob nested dir slash": ["mkdir -p d/sub", "touch d/f", "echo d/*/"],
+    "rm star spares dotfiles": ["touch .keep gone", "rm *", "ls -a"],
+
+    # ---- rm -d, seq, tac ---------------------------------------------------
+    "rm -d empty dir": ["mkdir d", "rm -d d", "ls"],
+    "rm -d non-empty": ["mkdir d", "touch d/f", "rm -d d"],
+    "seq": ["seq 3"],
+    "seq from to": ["seq 2 5"],
+    "seq with step": ["seq 1 2 7"],
+    "seq backwards": ["seq 3 -1 1"],
+    "seq bad arg": ["seq x"],
+    "tac": ["printf 'a\\nb\\nc\\n' > f", "tac f"],
+    "tac piped": ["printf 'a\\nb\\n' | tac"],
+    "sort -n falls back to dictionary": ["printf 'beta\\nAlpha\\n' > f", "sort -n f"],
+    "sort -n numbers": ["printf '10\\n9\\n2\\n' > f", "sort -n f"],
+
+    # ---- a script is these same lines, run in order ------------------------
+    "script exit code": ["printf '#!/bin/bash\\nexit 3\\n' > s.sh", "chmod +x s.sh",
+                         "./s.sh", "echo $?"],
+    "script positional args": ["printf '#!/bin/bash\\necho $1 $2\\n' > s.sh",
+                               "chmod +x s.sh", "./s.sh alpha beta"],
+    "script arg count": ["printf '#!/bin/bash\\necho $#\\n' > s.sh", "chmod +x s.sh",
+                         "./s.sh a b c"],
+    "script no args": ["printf '#!/bin/bash\\necho [$1] $#\\n' > s.sh", "chmod +x s.sh",
+                       "./s.sh"],
+    "script runs real commands": ["printf '#!/bin/bash\\nmkdir made\\nls\\n' > s.sh",
+                                  "chmod +x s.sh", "./s.sh"],
+    "script output can be piped": ["printf '#!/bin/bash\\necho a\\necho b\\n' > s.sh",
+                                   "chmod +x s.sh", "./s.sh | wc -l"],
+    "script output can be redirected": ["printf '#!/bin/bash\\necho hi\\n' > s.sh",
+                                        "chmod +x s.sh", "./s.sh > out", "cat out"],
+    "bash script missing": ["bash nope.sh"],
+    "script exit code from last command": ["printf '#!/bin/bash\\nls nope\\n' > s.sh",
+                                           "chmod +x s.sh", "./s.sh", "echo $?"],
+
+    # ---- cp / mv say what actually went wrong ------------------------------
+    "cp to missing dir": ["touch a b", "cp a b nope/"],
+    "mv to missing dir": ["touch a", "mv a nope/x"],
+    "cp unreadable source": ["echo hi > a", "chmod 000 a", "cp a b"],
+    "cp dir into itself": ["mkdir -p d/sub", "cp -r d d/sub2"],
+    "mv keeps working without read bit": ["echo hi > a", "chmod 000 a", "mv a b", "ls"],
+
+    # ---- tar's exit status is 2, not 1 -------------------------------------
+    "tar missing archive status": ["tar -tf nope", "echo $?"],
+    "tar -f with no argument": ["tar -cf"],
+    "tar no mode flag": ["tar -f x.tar"],
+    "tar create missing source": ["tar -cf t.tar nope", "echo $?"],
+
+    # ---- a pipe carries the newline too ------------------------------------
+    "pipe carries the terminator": ["echo hi | wc -c"],
+    "quoted spaces survive the pipe": ["echo 'x  y' | wc -c"],
+    "printf into wc -c": ["printf 'ab' | wc -c"],
+
+    # ---- cut: the class-1 /etc/passwd exercise -----------------------------
+    "cut -d -f1": ["printf 'a:b:c\\nd:e:f\\n' > p", "cut -d: -f1 p"],
+    "cut -f range": ["printf 'a:b:c:d\\n' > p", "cut -d: -f2-3 p"],
+    "cut -f open range": ["printf 'a:b:c:d\\n' > p", "cut -d: -f2- p"],
+    "cut -f list": ["printf 'a:b:c:d\\n' > p", "cut -d: -f1,3 p"],
+    "cut -f separate arg": ["printf 'a:b\\n' > p", "cut -d : -f 2 p"],
+    "cut -c": ["printf 'abcdef\\n' > p", "cut -c2-4 p"],
+    "cut no delimiter in line": ["printf 'nodelim\\na:b\\n' > p", "cut -d: -f1 p"],
+    "cut piped": ["printf 'a:b\\n' | cut -d: -f2"],
+    "cut no list": ["printf 'a:b\\n' > p", "cut -d: p"],
+    "cut bad list": ["printf 'a:b\\n' > p", "cut -d: -fx p"],
+    "cut missing file": ["cut -d: -f1 nope"],
 }
 
 
@@ -301,6 +508,13 @@ def main():
         print("bash not found — skipping the differential test.")
         return 0
     only = sys.argv[1] if len(sys.argv) > 1 else None
+    # An ENV_SPECIFIC name that no longer matches a case is a waiver for
+    # nothing — and the next case renamed into that slot would be exempted
+    # by accident. Fail loudly instead.
+    stale = sorted((ENV_SPECIFIC | ORDER_FREE) - set(CASES))
+    if stale:
+        print("stale waiver entries (no such case): " + ", ".join(stale))
+        return 1
     failures, env_only, ran = [], 0, 0
     for name, cmds in CASES.items():
         if only and only not in name:
@@ -309,6 +523,9 @@ def main():
         sim = normalise(run_simulated(cmds))
         raw, sandbox = run_bash(cmds)
         real = normalise(raw, sandbox, os.environ.get("USER"))
+        if name in ORDER_FREE:
+            sim = "\n".join(sorted(sim.split("\n")))
+            real = "\n".join(sorted(real.split("\n")))
         if "UNCAUGHT" in sim:
             failures.append((name, cmds, sim, real, "CRASH"))
         elif sim == real:

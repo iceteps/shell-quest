@@ -144,6 +144,14 @@ def _rand_name():
     return f"{random.choice(ADJ)}_{random.choice(NOUN)}"
 
 
+def _stable_id(seed):
+    """A commit's hash must not change between `git commit` and `git log`."""
+    h = 0
+    for ch in str(seed):
+        h = (h * 131 + ord(ch)) & 0xFFFFFFFFFFFF
+    return f"{h:012x}" + f"{h * 7 & 0xFFFFFFFF:08x}"
+
+
 def _rand_id():
     return "".join(random.choice("0123456789abcdef") for _ in range(12))
 
@@ -219,18 +227,45 @@ def _ps_table(io, conts):
 
 # ------------------------------------------------------------------ docker --
 def _parse_run_flags(args):
-    f = {"d": False, "it": False, "rm": False, "name": None, "network": "bridge", "ports": []}
+    """Returns (flags, bad_flag, cmd). A flag missing its value reports itself
+    rather than walking off the end of the list."""
+    f = {"d": False, "it": False, "rm": False, "name": None, "network": "bridge",
+         "ports": [], "env": [], "volumes": []}
     pos, i = [], 0
+
+    def need(flag):
+        """The value after a flag — or None, which the caller reports like docker does."""
+        return args[i + 1] if i + 1 < len(args) else None
+
     while i < len(args):
         a = args[i]
         if a == "--rm":
             f["rm"] = True
         elif a == "--name":
-            i += 1; f["name"] = args[i]
+            v = need(a)
+            if v is None:
+                return None, ("MISSINGVAL", a), None
+            i += 1; f["name"] = v
         elif a == "--network":
-            i += 1; f["network"] = args[i]
+            v = need(a)
+            if v is None:
+                return None, ("MISSINGVAL", a), None
+            i += 1; f["network"] = v
         elif a in ("-p", "--publish"):
-            i += 1; f["ports"].append(args[i])
+            v = need(a)
+            if v is None:
+                return None, ("MISSINGVAL", a), None
+            i += 1; f["ports"].append(v)
+        elif a in ("-e", "--env"):
+            v = need(a)
+            if v is None:
+                return None, ("MISSINGVAL", a), None
+            i += 1; f["env"].append(v)
+        elif a in ("-v", "--volume"):
+            v = need(a)
+            if v is None:
+                return None, ("MISSINGVAL", a), None
+            i += 1; f["volumes"].append(v)
         elif a in ("--detach",):
             f["d"] = True
         elif a.startswith("-") and not a.startswith("--") and set(a[1:]) <= set("dit") and a[1:]:
@@ -258,8 +293,16 @@ def do_docker(world, args, io):
     if sub == "version" and not rest:
         world.flags["_noop"] = True
         server = "Docker Engine - Community" if PLAYER_OS == "linux" else "Docker Desktop"
-        io.print("Client:\n Version:      26.1.4\n API version:  1.45\n OS/Arch:      linux/amd64\n\n"
+        # The CLIENT runs on the player's machine; the ENGINE is always Linux.
+        # That split is the whole lesson of `docker version` on a Mac/Windows box.
+        client_arch = pick({"mac": "darwin/arm64", "windows": "windows/amd64",
+                            "*": "linux/amd64"})
+        io.print("Client:\n Version:      26.1.4\n API version:  1.45\n"
+                 f" OS/Arch:      {client_arch}\n\n"
                  f"Server: {server}\n Engine:\n  Version:     26.1.4\n  OS/Arch:     linux/amd64")
+        if client_arch != "linux/amd64":
+            io.print(c("(client and engine differ — on your box Docker Desktop runs the engine "
+                       "inside a small Linux VM. Containers are ALWAYS Linux)", "dim"))
         return
 
     if sub == "compose":
@@ -286,8 +329,18 @@ def do_docker(world, args, io):
 
     elif sub == "run":
         parsed, bad, pos = _parse_run_flags(rest)
+        if isinstance(bad, tuple) and bad[0] == "MISSINGVAL":
+            flag = bad[1]
+            world.flags["_noop"] = True
+            io.print(f"docker: flag needs an argument: {flag}.")
+            io.print("See 'docker run --help'.")
+            return
         if bad:
-            io.print(f"unknown flag: {bad}"); return
+            world.flags["_noop"] = True
+            io.print(f"unknown flag: {bad}")
+            io.print(c("   (this world models the flags the course uses: -d -i -t --name "
+                       "--network -p -e -v --rm)", "dim"))
+            return
         if not pos:
             io.print("docker run: needs an image"); return
         img = world.norm_image(pos[0])
@@ -296,6 +349,17 @@ def do_docker(world, args, io):
             io.print(f"Status: Downloaded newer image for {img}")
             world.images.add(img)
         name = parsed["name"] or _rand_name()
+        if parsed["volumes"]:
+            io.print(c(f"   (mounted {len(parsed['volumes'])} volume(s) — a volume outlives the "
+                       "container, which is how data survives `docker rm`)", "dim"))
+            if PLAYER_OS == "linux" and any(":" in v and not v.endswith((":z", ":Z"))
+                                            for v in parsed["volumes"]):
+                io.print(c("   (on Fedora/RHEL, SELinux blocks the mount unless you append :Z — "
+                           "e.g. -v /data:/data:Z. The classic 'permission denied' on Fedora.)",
+                           "dim"))
+        if parsed["env"]:
+            io.print(c(f"   (passed {len(parsed['env'])} env var(s) into the container — "
+                       "config comes from the environment, not baked into the image)", "dim"))
         if name in world.containers:
             io.print(f'docker: Error response from daemon: Conflict. The container name "/{name}" is already in use.')
             return
@@ -315,8 +379,14 @@ def do_docker(world, args, io):
             world.flags["ps_a"] = True
             _ps_table(io, world.containers)
         else:
-            world.flags["ps"] = True
-            _ps_table(io, world.running())
+            running = world.running()
+            # "I verified it's running" only means something when something IS
+            # running — a bare header row is the definition of NOT verified.
+            if running:
+                world.flags["ps"] = True
+            _ps_table(io, running)
+            if not running:
+                io.print(c("(nothing running — `docker ps -a` also shows stopped containers)", "dim"))
 
     elif sub == "logs":
         if not rest:
@@ -699,6 +769,14 @@ def _extract_ns(args):
 
 def do_kubectl(world, args, io):
     k = world.k8s
+    if args and args[0] == "version" and any(
+            a in ("--client", "--client=true", "-c") for a in args[1:]):
+        world.flags["_noop"] = True
+        io.print("Client Version: v1.30.2")
+        io.print("Kustomize Version: v5.0.4")
+        io.print(c("(it answered → kubectl is installed. --client asks the BINARY, so it works "
+                   "with no cluster running at all)", "dim"))
+        return
     if k is None:
         io.print("This mission has no Kubernetes world — try `task`.")
         return
@@ -710,6 +788,11 @@ def do_kubectl(world, args, io):
     sub, rest = args[0], args[1:]
 
     if sub == "version":
+        if any(a in ("--client", "--client=true", "-c") for a in rest):
+            io.print("Client Version: v1.30.2")
+            io.print("Kustomize Version: v5.0.4")
+            world.flags["_noop"] = True
+            return
         io.print("Client Version: v1.30.0")
         if k["started"]:
             io.print("Server Version: v1.30.0")
@@ -1205,13 +1288,15 @@ def do_git(world, args, io):
             io.print("nothing to commit, working tree clean"); return
         if g["conflict"] and g["conflict"] not in g["staged"]:
             io.print("fatal: cannot commit — resolve the conflict and `git add` the file first"); return
-        g["commits"].append({"branch": g["branch"], "msg": msg})
+        sha = _stable_id(f"{g['branch']}:{len(g['commits'])}:{msg}")
+        g["commits"].append({"branch": g["branch"], "msg": msg, "sha": sha})
         g["tracked"] |= g["staged"]
         g["staged"] = set()
         if g["conflict"]:
             g["merged"].add(world.flags.get("merging", "?"))
             g["conflict"] = None
-        io.print(f"[{g['branch']} {_rand_id()[:7]}] {msg}")
+        root = " (root-commit)" if len(g["commits"]) == 1 else ""
+        io.print(f"[{g['branch']}{root} {sha[:7]}] {msg}")
 
     elif sub == "log":
         commits = [cm for cm in g["commits"]]
@@ -1220,10 +1305,12 @@ def do_git(world, args, io):
         world.flags["git_log"] = True
         oneline = "--oneline" in rest
         for cm in reversed(commits):
+            sha = cm.get("sha") or _stable_id(cm["msg"])
             if oneline:
-                io.print(f"{_rand_id()[:7]} {cm['msg']}")
+                io.print(f"{sha[:7]} {cm['msg']}")
             else:
-                io.print(c(f"commit {_rand_id()}{_rand_id()[:28]}", "yellow"))
+                io.print(c(f"commit {sha}{sha[:20]}", "yellow"))
+                io.print(f"Author: you <you@example.com>")
                 io.print(f"    {cm['msg']}\n")
 
     elif sub == "branch":
@@ -1325,8 +1412,83 @@ def _mark_edited(world, fname):
 COMMON_IMAGES = {"ubuntu", "nginx", "alpine", "redis", "python", "busybox", "hello-world"}
 
 
+def _host_pipe(world, args, io, produce):
+    """`… | grep X`, `… | wc -l`, `… | head -n N` for the host shell.
+
+    Without this a pipe was silently dropped and the unfiltered output printed —
+    which reads as "grep matched everything" and teaches the opposite of the truth.
+    """
+    if "|" not in args:
+        return None
+    i = args.index("|")
+    rest = args[i + 1:]
+    if not rest:
+        io.print("bash: syntax error near unexpected token `|'")
+        world.flags["_noop"] = True
+        return True
+    text = produce(args[:i])
+    if text is None:
+        return True
+    tool, targs = rest[0], rest[1:]
+    if tool == "grep":
+        pats = [a for a in targs if not a.startswith("-")]
+        insensitive = any(a.startswith("-") and "i" in a for a in targs)
+        invert = any(a.startswith("-") and "v" in a for a in targs)
+        if not pats:
+            io.print("usage: grep [OPTION]... PATTERN [FILE]...")
+            return True
+        pat = pats[0]
+        keep = [ln for ln in text.split("\n")
+                if ((pat.lower() in ln.lower()) if insensitive else (pat in ln)) != invert]
+        if keep:
+            io.print("\n".join(keep))
+    elif tool == "wc":
+        lines = [x for x in text.split("\n")]
+        if lines and lines[-1] == "":
+            lines.pop()
+        io.print(str(len(lines)) if any("l" in a for a in targs if a.startswith("-"))
+                 else f"{len(lines):>7} {len(text.split()):>7} {len(text):>7}")
+    elif tool in ("head", "tail"):
+        n = 10
+        for j, a in enumerate(targs):
+            if a == "-n" and j + 1 < len(targs) and targs[j + 1].isdigit():
+                n = int(targs[j + 1])
+            elif re.fullmatch(r"-\d+", a):
+                n = int(a[1:])
+        lines = [x for x in text.split("\n") if x != ""]
+        io.print("\n".join(lines[:n] if tool == "head" else lines[-n:]))
+    else:
+        world.flags["_noop"] = True
+        io.print(f"`{tool}` isn't wired into this world's pipes yet — "
+                 "grep, wc, head and tail are.")
+    return True
+
+
 def do_host(world, prog, args, io):
     files = world.files
+
+    def _produce(left):
+        """Text that the left-hand side of a pipe would have printed."""
+        if prog == "ls":
+            return "\n".join(sorted(files))
+        if prog == "cat":
+            names = [a for a in left if not a.startswith("-")]
+            out = []
+            for n in names:
+                if n in files:
+                    out.append(files[n])
+                else:
+                    io.print(f"cat: {n}: No such file or directory")
+                    return None
+            return "\n".join(out)
+        if prog == "echo":
+            return " ".join(left)
+        if prog == "history":
+            return "\n".join(f"  {i}  {c}" for i, c in enumerate(world.history, 1))
+        return None
+
+    if _host_pipe(world, args, io, _produce):
+        return
     if prog == "ls":
         target = next((a for a in args if not a.startswith("-")), None)
         if target:
@@ -1353,11 +1515,22 @@ def do_host(world, prog, args, io):
         from datetime import datetime
         io.print(datetime.now().strftime("%a %b %d %H:%M:%S %Y"))
     elif prog == "uname":
-        io.print("Linux quest-host 6.8.0-quest x86_64 GNU/Linux" if args else "Linux")
+        flags = "".join(a[1:] for a in args if a.startswith("-"))
+        if not flags:
+            io.print("Linux")
+        elif "a" in flags:
+            io.print("Linux quest-host 6.8.0-quest #1 SMP x86_64 GNU/Linux")
+        else:
+            parts = []
+            if "s" in flags: parts.append("Linux")
+            if "n" in flags: parts.append("quest-host")
+            if "r" in flags: parts.append("6.8.0-quest")
+            if "m" in flags: parts.append("x86_64")
+            io.print(" ".join(parts) or "Linux")
     elif prog == "history":
         for i, cmd in enumerate(world.history, 1):
             io.print(f"  {i}  {cmd}")
-    elif prog in ("which", "where", "command"):
+    elif prog in ("which", "where", "command", "type"):
         world.flags["_noop"] = True
         target = next((a for a in args if not a.startswith("-")), None)
         if not target:
@@ -1367,12 +1540,16 @@ def do_host(world, prog, args, io):
                    "ansible", "ansible-playbook", "ansible-doc", "argocd", "python", "python3",
                    "pip", "curl", "bash", "sh", "ls", "cat", "touch", "mkdir", "rm", "echo", "edit"}
         if target in on_path:
-            io.print(f"/usr/bin/{target}")
+            io.print(f"{target} is /usr/bin/{target}" if prog == "type" else f"/usr/bin/{target}")
             io.print(c("(on PATH = installed — the check to run BEFORE any install step)", "dim"))
             if prog == "which":
                 io.print(c("(`command -v` is the portable form — the one to use inside scripts)", "dim"))
         else:
-            io.print(f"{prog}: no {target} in (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin)")
+            if prog == "which":
+                io.print(f"which: no {target} in (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin)")
+            elif prog == "type":
+                io.print(f"bash: type: {target}: not found")
+            # `command -v` says nothing on failure — that silence is the point.
             if in_real_world(target):
                 io.print(c(f"(not on this Linux-ish host — type `{target}` by itself to see how it maps here)", "dim"))
         if prog == "where":
@@ -1383,29 +1560,46 @@ def do_host(world, prog, args, io):
                 io.print(c(f"(`where` is the Windows spelling — you're on {os_label()}, "
                            "where the habit is `which`)", "dim"))
     elif prog == "mkdir" and args:
-        target = args[-1]
-        key = target.rstrip("/") + "/"
-        if key in files and "-p" not in args:
-            io.print(f"mkdir: cannot create directory '{target}': File exists")
-            io.print(c("(-p makes mkdir idempotent: create if missing, quiet if it already exists)", "dim"))
-        else:
-            files[key] = ""
+        parents = any(a.startswith("-") and "p" in a for a in args)
+        for target in [a for a in args if not a.startswith("-")]:
+            key = target.rstrip("/") + "/"
+            if key in files and not parents:
+                io.print(f"mkdir: cannot create directory '{target}': File exists")
+                io.print(c("(-p makes mkdir idempotent: create if missing, quiet if it "
+                           "already exists)", "dim"))
+            else:
+                files[key] = ""
     elif prog == "cat":
         if not args:
             io.print("cat: needs a file"); return
         io.print(files.get(args[0], f"cat: {args[0]}: No such file or directory"))
     elif prog == "touch" and args:
-        if args[0] not in files:
-            files[args[0]] = ""
-            _mark_edited(world, args[0])
+        for n in [a for a in args if not a.startswith("-")]:
+            if n not in files:
+                files[n] = ""
+            _mark_edited(world, n)
     elif prog == "rm" and args:
-        files.pop(args[0], None)
+        names = [a for a in args if not a.startswith("-")]
+        force = any(a.startswith("-") and "f" in a for a in args)
+        for n in names:
+            if n in files:
+                files.pop(n, None)
+            elif not force:
+                io.print(f"rm: cannot remove '{n}': No such file or directory")
     elif prog == "echo":
         # support: echo "text" > file
-        if ">" in args:
-            i = args.index(">")
+        op = next((x for x in (">>", ">") if x in args), None)
+        if op:
+            i = args.index(op)
+            if i + 1 >= len(args):
+                world.flags["_noop"] = True
+                io.print("bash: syntax error near unexpected token `newline'")
+                return
             text, fname = " ".join(args[:i]), args[i + 1]
-            files[fname] = text
+            if op == ">>" and fname in files and files[fname]:
+                files[fname] = files[fname].rstrip("\n") + "\n" + text
+            else:
+                files[fname] = text
             _mark_edited(world, fname)
         else:
             io.print(" ".join(args))
@@ -1416,12 +1610,23 @@ def do_host(world, prog, args, io):
         io.print(c(f"--- editing {fname} (current content below; type NEW content, end with a single '.') ---", "dim"))
         io.print(files.get(fname, "(new file)"))
         io.print(c("--- type new content now ---", "dim"))
-        lines = []
+        lines, aborted = [], False
         while True:
-            line = io.input("… ")
+            try:
+                line = io.input("… ")
+            except KeyboardInterrupt:
+                aborted = True
+                io.print(c("^C  (edit cancelled — nothing written)", "yellow"))
+                break
+            except EOFError:
+                io.print(c("(end of input — saving what you typed)", "dim"))
+                break
             if line.strip() == ".":
                 break
             lines.append(line)
+        if aborted:
+            world.flags["_noop"] = True
+            return
         files[fname] = "\n".join(lines)
         _mark_edited(world, fname)
         io.print(c(f"saved {fname}", "dim"))
@@ -1434,9 +1639,22 @@ def do_host(world, prog, args, io):
 # ------------------------------------------------- real-world command atlas --
 # Commands players type because they're REAL — recognized and redirected with a
 # micro-lesson instead of a cold "command not found". (headline, dim follow-up)
+# Keyed by DISTRO FAMILY where it matters: telling a Fedora student that `apt` is
+# their package manager is exactly the kind of wrong the OS layer exists to prevent.
 _PKG_HOME = {"winget": "windows", "choco": "windows", "scoop": "windows", "brew": "mac",
-             "apt": "linux", "apt-get": "linux", "yum": "linux", "dnf": "linux",
-             "flatpak": "linux", "snap": "linux"}
+             "apt": "debian", "apt-get": "debian", "yum": "fedora", "dnf": "fedora",
+             "flatpak": "linux", "snap": "debian"}
+
+
+def _pkg_matches_player(prog):
+    home = _PKG_HOME.get(prog)
+    if home is None:
+        return False
+    if home in ("windows", "mac"):
+        return PLAYER_OS == home
+    if home == "linux":
+        return PLAYER_OS == "linux"
+    return PLAYER_OS == "linux" and PLAYER_DISTRO == home
 
 
 def _PKG_MGR(prog="apt"):
@@ -1446,7 +1664,7 @@ def _PKG_MGR(prog="apt"):
             "(e.g. it could install Docker itself).")
     tail = ("An IMAGE isn't an app though: Docker fetches those itself → "
             "docker pull <image>   (`setup` = the real install steps)")
-    if _PKG_HOME.get(prog) == PLAYER_OS:
+    if _pkg_matches_player(prog):
         return head, f"`{prog}` is the right one for your {os_label()} box. " + tail
     return head, (f"`{prog}` belongs to another OS — on your {os_label()} box it's "
                   f"`{yours}`. " + tail)
@@ -1461,7 +1679,12 @@ REAL_WORLD = {
         "windows": ("🌍 `wsl` opens a Linux shell on a real Windows box — good instinct!",
                     "it's how Docker Desktop runs containers on Windows at all. Here you're already "
                     "on a Linux-ish host, so docker & friends work right where you are"),
-        "*": (f"🌍 `wsl` is a WINDOWS thing — you're on {os_label()}, so there's nothing to bridge.",
+        # macOS is Unix but NOT Linux — it has no Linux kernel either, which is why
+        # Docker Desktop runs a hidden Linux VM there too. Don't claim it has one.
+        "mac": ("🌍 `wsl` is a WINDOWS thing — on macOS there's nothing to open.",
+                "WSL gives Windows a Linux kernel; macOS is Unix but not Linux, so Docker "
+                "Desktop runs its own small Linux VM for you — same trick, no command to type"),
+        "*": ("🌍 `wsl` is a WINDOWS thing — you're on Linux, so there's nothing to bridge.",
               "WSL exists to give Windows a Linux kernel; your machine already has one"),
     }),
     "sudo": lambda p: pick({
@@ -1488,7 +1711,13 @@ REAL_WORLD = {
     "ipconfig": lambda p: pick({
         "windows": ("🌍 `ipconfig` is the Windows one — this world's networking is docker's:",
                     "docker network ls · docker network create <name>"),
-        "*": (f"🌍 `ipconfig` is the WINDOWS spelling — on {os_label()} it's `ip a` (or `ifconfig`).",
+        # macOS DOES have an `ipconfig`, but it's a different program and there is
+        # no `ip` on a Mac at all — don't send people to a command they don't have.
+        "mac": ("🌍 macOS has an `ipconfig`, but it's not the Windows one — for 'show me my "
+                "addresses' the Mac spelling is `ifconfig`.",
+                "and in here, networking means docker's: docker network ls · docker network create <name>"),
+        "*": ("🌍 `ipconfig` is the WINDOWS spelling — on Linux it's `ip a` (`ifconfig` is the "
+              "deprecated older one).",
               "and in here, networking means docker's: docker network ls · docker network create <name>"),
     }),
     "ip": ("🌍 `ip` manages real Linux networking — this world's networking is docker's:",
@@ -1634,6 +1863,19 @@ def print_setup(io):
             io.print(c(f"     {note}", "dim"))
     io.print(c("\n   Change OS:  `os linux` · `os mac` · `os windows`   (or: python quest.py --os <name>)\n", "dim"))
 
+# What a version check prints for the tools that live in mission handlers. `setup`
+# points players at these, so they must answer from any mission.
+TOOL_VERSION_LINES = {
+    "helm": 'version.BuildInfo{Version:"v3.15.2", GitCommit:"1a500d5", '
+            'GitTreeState:"clean", GoVersion:"go1.22.4"}',
+    "terraform": "Terraform v1.9.0\non linux_amd64",
+    "ansible": "ansible [core 2.17.1]\n  python version = 3.12.4",
+    "ansible-playbook": "ansible-playbook [core 2.17.1]",
+    "argocd": "argocd: v2.11.3+3f344d5",
+    "rabbitmqctl": "RabbitMQ CLI 3.13.2",
+    "ansible-doc": "ansible-doc [core 2.17.1]",
+}
+
 # Tools that ARE in the game, but live in other missions' handlers.
 MISSION_TOOLS = {
     "helm": "the ⎈ Helm missions", "terraform": "the 🏗️ Terraform missions",
@@ -1648,8 +1890,14 @@ def dispatch(world, line, io, mission):
     """Route one command line. Returns False if the player wants to leave."""
     try:
         args = shlex.split(line)
-    except ValueError as e:
-        io.print(f"parse error: {e}")
+    except ValueError:
+        # Python's own wording ("No closing quotation") would break the illusion —
+        # and the fix the player needs is bash's, not Python's.
+        quote = '"' if line.count('"') % 2 else "'"
+        io.print(f"bash: unexpected EOF while looking for matching `{quote}'")
+        io.print(c(f"   you opened a {quote} and never closed it — add the closing "
+                   f"{quote} and run it again", "dim"))
+        world.flags["_noop"] = True
         return True
     if not args:
         return True
@@ -1691,7 +1939,8 @@ def dispatch(world, line, io, mission):
     elif prog == "docker-compose":
         _do_compose(world, rest, io)
     elif prog in ("ls", "cat", "touch", "mkdir", "rm", "echo", "edit", "pwd", "whoami",
-                  "hostname", "clear", "date", "uname", "history", "which", "where", "command"):
+                  "hostname", "clear", "date", "uname", "history", "which", "where",
+                  "command", "type"):
         do_host(world, prog, rest, io)
     elif prog == "ping":
         io.print("ping: works from INSIDE a container here — docker exec -it <name> bash, then ping <other>")
@@ -1709,6 +1958,10 @@ def dispatch(world, line, io, mission):
         io.print(c("   " + _fmt(follow, prog), "dim"))
     elif prog in MISSION_TOOLS:
         world.flags["_noop"] = True
+        if rest and rest[0] in ("version", "--version", "-v", "--short"):
+            io.print(TOOL_VERSION_LINES.get(prog, f"{prog} (version unknown)"))
+            io.print(c("(it answered → it's installed. `setup` shows how it gets there)", "dim"))
+            return True
         io.print(f"🌍 `{prog}` IS in the game — it lives in {MISSION_TOOLS[prog]}. This mission doesn't use it.")
         io.print(c("   `task` shows what THIS mission needs · `quit` returns to the map", "dim"))
     else:

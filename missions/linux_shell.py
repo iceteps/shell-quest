@@ -21,16 +21,23 @@ Deliberate omissions, teaching decisions rather than shortcuts:
   * `$(…)` of state-changing commands is refused rather than half-simulated;
   * no `awk`/`sed` programs — out of scope for class 1, and a half-working awk
     teaches worse than an honest "not here";
-  * `sleep` without `&` does not silently background (real bash blocks).
+  * `sleep` without `&` does not silently background (real bash blocks);
+  * `&` only backgrounds at the END of a line — bash also lets it separate
+    mid-line, and the shell says so instead of guessing.
 
 Structure: tokenize once (keeping quote state, because that decides globbing),
-split on `;` `&&` `||`, then on `|`, then peel redirections off each stage.
-Every builtin returns a Res(out, err, code) so pipes, redirection, exit codes
-and `&&` all compose the way they do in bash.
+check the parser rules, split on `;` `&&` `||`, then on `|`, then peel
+redirections off each stage. Every builtin returns a Res(out, err, code, nonl)
+so pipes, redirection, exit codes and `&&` all compose the way they do in bash;
+`nonl` carries whether the stream ended with a newline, which is the difference
+`wc -c` measures between `echo a > f` and `printf a > f`.
+
+A script is not a separate dialect: `./s.sh` runs its lines through this same
+run_line(), so `exit 3`, `$1`, pipes and redirection inside a script behave
+exactly as they do at the prompt.
 """
 import json
 import re
-import shlex  # noqa: F401  (kept: mission solutions may still be shlex-shaped)
 from datetime import datetime
 
 from engine import c, in_real_world, real_world_entry
@@ -42,16 +49,30 @@ KERNEL = "6.8.0-quest"
 
 
 class Res:
-    """One command's result: stdout, stderr, exit code — like a real process."""
+    """One command's result: stdout, stderr, exit code — like a real process.
 
-    __slots__ = ("out", "err", "code")
+    `out` is the stream MINUS at most one trailing newline (so printing it is
+    just io.print), and `nonl` records whether that newline was there. Only
+    `echo -n` and a `printf` whose format doesn't end in \\n set it — but they
+    are exactly the commands people use to write a file with no trailing
+    newline, so `wc -c` can only be honest if the difference is carried.
+    """
 
-    def __init__(self, out="", err="", code=0):
-        self.out, self.err, self.code = out, err, code
+    __slots__ = ("out", "err", "code", "nonl")
+
+    def __init__(self, out="", err="", code=0, nonl=False):
+        self.out, self.err, self.code, self.nonl = out, err, code, nonl
 
 
 def ok(out=""):
     return Res(out=out)
+
+
+def stream(text):
+    """A Res from a raw stream: keeps whether it ended with a newline."""
+    if text.endswith("\n"):
+        return Res(out=text[:-1])
+    return Res(out=text, nonl=True)
 
 
 def fail(err, code=1):
@@ -59,6 +80,41 @@ def fail(err, code=1):
 
 
 FALLTHROUGH = object()          # "not my command" — hand back to the engine atlas
+
+
+# The files class 1 actually opens. /etc/passwd is the canonical "one record per
+# line, colon-separated" file — it is the example every cut/grep exercise uses.
+SYSTEM_FILES = {
+    "/etc/passwd": (
+        "root:x:0:0:root:/root:/bin/bash\n"
+        "bin:x:1:1:bin:/bin:/sbin/nologin\n"
+        "daemon:x:2:2:daemon:/sbin:/sbin/nologin\n"
+        "nobody:x:65534:65534:Kernel Overflow User:/:/sbin/nologin\n"
+        "systemd-network:x:192:192:systemd Network Management:/:/usr/sbin/nologin\n"
+        "sshd:x:74:74:Privilege-separated SSH:/usr/share/empty.sshd:/sbin/nologin\n"
+        "student:x:1000:1000:Student:/home/student:/bin/bash\n"),
+    "/etc/group": (
+        "root:x:0:\n"
+        "wheel:x:10:student\n"
+        "docker:x:989:student\n"
+        "student:x:1000:\n"),
+    "/etc/hostname": HOSTNAME + "\n",
+    "/etc/os-release": (
+        'NAME="Fedora Linux"\n'
+        "VERSION=\"40 (Workstation Edition)\"\n"
+        "ID=fedora\n"
+        "VERSION_ID=40\n"
+        'PRETTY_NAME="Fedora Linux 40 (Workstation Edition)"\n'),
+    "/etc/hosts": ("127.0.0.1   localhost localhost.localdomain\n"
+                   "::1         localhost localhost.localdomain\n"
+                   "10.0.2.15   " + HOSTNAME + "\n"),
+    "/var/log/syslog": (
+        "Aug 15 09:14:02 quest-host systemd[1]: Started Daily apt upgrade.\n"
+        "Aug 15 09:14:05 quest-host kernel: [  0.000000] Linux version 6.8.0-quest\n"
+        "Aug 15 10:02:11 quest-host sshd[1841]: Accepted publickey for root from 10.0.2.2\n"
+        "Aug 15 10:31:44 quest-host CRON[2210]: (root) CMD (/root/backup.sh)\n"
+        "Aug 15 11:05:09 quest-host kernel: [ 3241.882] ERROR out of memory: killed process 2318\n"),
+}
 
 
 # ------------------------------------------------------------------- state --
@@ -73,10 +129,15 @@ def st(world):
         f["next_pid"] = 4821
         f["cron"] = []
         f["last_code"] = 0
+        for path, body in SYSTEM_FILES.items():
+            world.files.setdefault(path, body)
         for name in list(world.files):          # seed files land in HOME
             if not name.startswith("/"):
                 world.files[f"{HOME}/{name}"] = world.files.pop(name)
     return f
+
+
+EMPTY_PATH = object()          # distinguishes "" from a legitimately resolved path
 
 
 def abspath(world, p):
@@ -119,12 +180,34 @@ def mode_of(world, p):
     return st(world)["modes"].get(p, 0o755 if isdir(world, p) else 0o644)
 
 
+def readable(world, p):
+    """The player owns everything here, so the OWNER triad is what applies.
+    Bits that don't stop anything teach nothing — `chmod 000 f` must make
+    `cat f` fail, or the whole permissions lesson is decoration."""
+    return bool(mode_of(world, p) & 0o400)
+
+
+def writable(world, p):
+    return bool(mode_of(world, p) & 0o200)
+
+
+def searchable(world, p):
+    return bool(mode_of(world, p) & 0o100)
+
+
 def mode_str(world, p):
     m = mode_of(world, p)
     out = "d" if isdir(world, p) else "-"
-    for shift in (6, 3, 0):
+    # setuid/setgid/sticky ride in the x column as s/s/t — chmod 4755 vs 755 is
+    # invisible in the number but very visible here.
+    special = [(m >> 11) & 1, (m >> 10) & 1, (m >> 9) & 1]
+    for i, shift in enumerate((6, 3, 0)):
         bits = (m >> shift) & 7
-        out += ("r" if bits & 4 else "-") + ("w" if bits & 2 else "-") + ("x" if bits & 1 else "-")
+        third = "x" if bits & 1 else "-"
+        if special[i]:
+            marker = "t" if i == 2 else "s"
+            third = marker if bits & 1 else marker.upper()
+        out += ("r" if bits & 4 else "-") + ("w" if bits & 2 else "-") + third
     return out
 
 
@@ -134,7 +217,7 @@ def children(world, d):
     for p in list(world.files) + list(st(world)["dirs"]):
         if p.startswith(prefix) and p != d:
             out.add(p[len(prefix):].split("/")[0])
-    return sorted(out)
+    return sorted(out, key=collate)          # `ls` collates like `sort` does
 
 
 def walk(world, start):
@@ -143,7 +226,7 @@ def walk(world, start):
     pre = start.rstrip("/") + "/"
     hits = [p for p in list(world.files) + list(f["dirs"])
             if p == start or p.startswith(pre)]
-    return sorted(set(hits))
+    return sorted(set(hits), key=collate)
 
 
 def mkdir_one(world, p, parents=False, shown=None):
@@ -174,14 +257,26 @@ def write_file(world, p, content, append=False):
     if not isdir(world, parent):
         return f"bash: {p}: No such file or directory"
     if append and p in world.files:
-        prev = world.files[p]
-        world.files[p] = prev + ("\n" if prev and not prev.endswith("\n") else "") + content
+        # `>>` appends bytes, nothing more — it does NOT insert a separator.
+        world.files[p] = world.files[p] + content
     else:
         world.files[p] = content
     return None
 
 
 # ------------------------------------------------------------- tokenizing --
+# A backslash-escaped $ or ` must survive expansion as a literal. Standing them
+# in as characters no expander looks at keeps the protection per-character.
+ESCAPED = {"$": "\x01", "`": "\x02", "*": "\x03", "?": "\x04", "[": "\x05"}
+UNESCAPE = {v: k for k, v in ESCAPED.items()}
+
+
+def unsentinel(text):
+    for sentinel, ch in UNESCAPE.items():
+        text = text.replace(sentinel, ch)
+    return text
+
+
 def tokenize(line):
     """-> [(word, quoted, single)]  — quoting decides globbing and $-expansion.
 
@@ -199,7 +294,11 @@ def tokenize(line):
             nxt = line[i + 1] if i + 1 < n else ""
             if q is None:
                 if nxt:
-                    buf += nxt
+                    # `echo \$HOME` must print $HOME, not your home directory: a
+                    # backslash quotes the next character as surely as '…' does.
+                    # Only the ONE character is protected, so a sentinel beats
+                    # marking the whole word quoted (`\$x*` still globs).
+                    buf += ESCAPED.get(nxt, nxt)
                     i += 2
                     continue
                 i += 1
@@ -232,8 +331,18 @@ def tokenize(line):
             continue
         # Operators are self-delimiting in bash: `echo a;echo b` and `2>/dev/null`
         # need no spaces, so recognise them mid-word rather than only as lone tokens.
+        # `2>&1` duplicates a descriptor — one operator, not `2>` `&` `1`.
+        dup = re.match(r">&(\d)", line[i:])
+        if dup:
+            fd = buf if re.fullmatch(r"\d", buf) else "1"
+            if buf and not re.fullmatch(r"\d", buf):
+                words.append((buf, seen, sq))
+            words.append((f"{fd}>&{dup.group(1)}", False, False))
+            buf, seen, sq = "", False, False
+            i += dup.end()
+            continue
         two = line[i:i + 2]
-        if two in ("&&", "||", ">>"):
+        if two in ("&&", "||", ">>", ";;", "|&"):
             if buf or seen:
                 words.append((buf, seen, sq))
                 buf, seen, sq = "", False, False
@@ -286,9 +395,16 @@ def expand_subst(world, io, text):
 
 def expand_vars(world, s):
     f = st(world)
+    # $1..$9, $@, $# — a script's arguments. Outside a script there are none,
+    # which is exactly what bash says too (empty, and $# is 0).
+    argv = f.get("script_args") or []
+    s = re.sub(r"\$\{?([1-9])\}?",
+               lambda m: argv[int(m.group(1)) - 1] if int(m.group(1)) <= len(argv) else "", s)
     for var, val in (("$HOME", HOME), ("${HOME}", HOME), ("$PWD", f["cwd"]),
                      ("${PWD}", f["cwd"]), ("$USER", USER), ("${USER}", USER),
-                     ("$HOSTNAME", HOSTNAME), ("$?", str(f["last_code"]))):
+                     ("$HOSTNAME", HOSTNAME), ("$#", str(len(argv))),
+                     ("$@", " ".join(argv)), ("$*", " ".join(argv)),
+                     ("$0", f.get("script_name") or "bash"), ("$?", str(f["last_code"]))):
         s = s.replace(var, val)
     return s
 
@@ -324,7 +440,11 @@ def glob_word(world, word):
     exactly as bash does when nullglob is off."""
     if not any(ch in word for ch in "*?["):
         return [word]
-    target = abspath(world, word)
+    # A trailing slash is part of the pattern's meaning: `*/` matches ONLY
+    # directories, and the slash stays in the result.
+    dirs_only = word.endswith("/")
+    stem = word[:-1] if dirs_only else word
+    target = abspath(world, stem)
     d, _, pat = target.rpartition("/")
     d = d or "/"
     if not isdir(world, d):
@@ -334,12 +454,20 @@ def glob_word(world, word):
                         .replace(r"\[", "[").replace(r"\]", "]") + "$")
     except re.error:
         return [word]          # an unbalanced [ is a literal to bash, not an error
-    hits = [n for n in children(world, d) if rx.match(n) and not n.startswith(".")]
+    # Dotfiles hide from globs unless the pattern asks for them by leading dot —
+    # which is why `rm *` leaves `.bashrc` alone and `ls` looks empty in $HOME.
+    want_dots = pat.startswith(".")
+    hits = [n for n in children(world, d)
+            if rx.match(n) and (want_dots or not n.startswith("."))]
+    if dirs_only:
+        hits = [n for n in hits if isdir(world, d.rstrip("/") + "/" + n)]
     if not hits:
         return [word]
-    keep_dir = "/" in word
-    base = word.rsplit("/", 1)[0] if keep_dir else ""
-    return [(base + "/" + h) if keep_dir else h for h in sorted(hits)]
+    keep_dir = "/" in stem
+    base = stem.rsplit("/", 1)[0] if keep_dir else ""
+    tail = "/" if dirs_only else ""
+    return [((base + "/" + h) if keep_dir else h) + tail
+            for h in sorted(hits, key=collate)]
 
 
 def expand_argv(world, words, io=None):
@@ -348,12 +476,21 @@ def expand_argv(world, words, io=None):
     i = 0
     while i < len(words):
         w, quoted, single = words[i]
+        if not quoted and re.fullmatch(r"\d>&\d", w):   # 2>&1 — no target to read
+            redirs.append((w, None))
+            i += 1
+            continue
         if not quoted and (w in (">", ">>", "<") or re.fullmatch(r"\d>>?", w)):
             if i + 1 < len(words):
-                redirs.append((w, expand_vars(world, words[i + 1][0])))
+                nxt, nxt_quoted, _ = words[i + 1]
+                # `ls > > f` — the target of a redirect can't be another operator.
+                if not nxt_quoted and (nxt in CTRL_OPS or nxt in (">", ">>", "<")
+                                       or re.fullmatch(r"\d>>?", nxt)):
+                    return argv, redirs, f"bash: syntax error near unexpected token `{nxt}'"
+                redirs.append((w, unsentinel(expand_vars(world, nxt))))
                 i += 2
                 continue
-            return argv, redirs, f"bash: syntax error near unexpected token `newline'"
+            return argv, redirs, "bash: syntax error near unexpected token `newline'"
 
         if single:
             argv.append(w)                       # single quotes: literal, full stop
@@ -362,7 +499,36 @@ def expand_argv(world, words, io=None):
             for b in ([v] if quoted else expand_braces(v)):
                 argv.extend([b] if quoted else glob_word(world, b))
         i += 1
-    return argv, redirs, None
+    return [unsentinel(a) for a in argv], redirs, None
+
+
+# Control operators, in bash's sense: they separate commands rather than being
+# arguments to one. `;` and `&` may legally end a line; the others may not.
+CTRL_OPS = {";", "&&", "||", "|", "|&", "&", ";;"}
+TERMINATORS = {";", "&"}
+
+
+def check_syntax(words):
+    """bash's parser rules for control operators. -> error string, or None.
+
+    Real bash is a parser, not a splitter: it rejects `| echo hi`, `;;` and a
+    trailing `&&` outright. Silently dropping the empty command instead would
+    teach that those lines are fine — they are the classic beginner typos.
+    """
+    prev_was_op = True                      # start of line == "after a separator"
+    for w, quoted, _single in words:
+        if quoted or w not in CTRL_OPS:
+            prev_was_op = False
+            continue
+        # `;;` only means anything inside a `case`, which this shell has none of.
+        if prev_was_op or w == ";;":
+            return f"bash: syntax error near unexpected token `{w}'"
+        prev_was_op = True
+    if prev_was_op and words:
+        last = words[-1][0]
+        if last not in TERMINATORS:
+            return "bash: syntax error: unexpected end of file"
+    return None
 
 
 def split_on(words, seps):
@@ -423,23 +589,27 @@ TOOL_HOME = {
     "terraform": "the 🏗️ Terraform missions", "ansible": "the 📜 Ansible missions",
     "python3": "the 📨 RabbitMQ mission", "python": "the 📨 RabbitMQ mission",
 }
+# Only what this shell can ACTUALLY run. `which X` printing a path is a promise
+# that X works — listing something we then refuse would break the very
+# check-before-you-install habit the game teaches.
 ON_PATH = {
     "bash", "sh", "ls", "cat", "cp", "mv", "rm", "rmdir", "mkdir", "touch", "chmod",
-    "chown", "grep", "find", "head", "tail", "wc", "sort", "uniq", "cut", "tr",
+    "chown", "grep", "find", "head", "tail", "wc", "sort", "uniq", "tac", "seq", "cut",
     "echo", "printf", "pwd", "cd", "date", "df", "du", "ps", "kill", "sleep", "ip",
-    "ping", "tar", "gzip", "gunzip", "zip", "unzip", "crontab", "whoami", "id",
-    "groups", "hostname", "uname", "which", "less", "more", "man", "vi", "vim",
-    "nano", "ssh", "scp", "curl", "wget", "dnf", "rpm", "systemctl",
+    "ping", "tar", "gzip", "gunzip", "crontab", "whoami", "id", "basename", "dirname",
+    "groups", "hostname", "uname", "which", "less", "more", "true", "false", "sudo",
 } | set(TOOL_VERSIONS)
 
 HELP_LINES = [
-    "   files: ls (-l -a -R) · cd · pwd · mkdir (-p) · touch · cat · cp (-r) · mv · rm (-r) · rmdir",
-    "   text:  echo (-e) · > >> < · grep (-i -v -n -c -r) · find (-name -type) · head · tail · wc · sort · uniq",
-    "   perms: chmod (600 · u+x · -R) · ls -l to read the triads · chown",
-    "   procs: sleep N & · jobs · ps (aux) · kill (-9) · date",
-    "   system: df (-h) · du (-sh) · ip a · ping -c N · uname (-r -a) · whoami · id · history · which",
+    "   files: ls (-l -a -R -d) · cd · pwd · mkdir (-p) · touch · cat · cp (-r) · mv · rm (-r -d) · rmdir",
+    "   text:  echo (-n -e) · printf · grep (-i -v -n -c -r -l -w -q -E -F) · cut (-d -f -c) · sort (-n -r -u)",
+    "          uniq (-c) · head · tail · wc · tac · seq · find (-name -type -maxdepth) · basename · dirname",
+    "   perms: chmod (600 · 4755 · u+x · -R) · ls -l to read the triads · chown · sudo",
+    "   procs: sleep N & · jobs · ps (aux) · kill (-9) · date · crontab (-l -e)",
+    "   system: df (-h) · du (-sh) · ip a · ping -c N · uname (-r -a) · whoami · id · history · which · type",
     "   archives: tar (-cvf -tvf -xvf -z) · gzip · gunzip",
-    "   also: | pipes · ; && || chaining · file{1,2,3}.txt braces · *.txt globs · edit <file> · $HOME",
+    "   shell: | and |& pipes · > >> < 2> 2>&1 · ; && || · $? exit codes · {1,2,3} braces · *.txt globs",
+    "          $(date) substitution · scripts with #! and $1 $2 $# · edit <file> · /etc/passwd is real",
 ]
 
 
@@ -448,6 +618,9 @@ def _ls(world, args, f, tty=True):
     long = any(a.startswith("-") and not a.startswith("--") and "l" in a for a in args)
     all_ = any(a.startswith("-") and not a.startswith("--") and "a" in a for a in args)
     rec = any(a.startswith("-") and not a.startswith("--") and "R" in a for a in args)
+    # -d: the DIRECTORY itself, not its contents. `ls -ld dir` is how you read a
+    # directory's own permission bits — the whole point of the chmod exercise.
+    dironly = any(a.startswith("-") and not a.startswith("--") and "d" in a for a in args)
     targets = [a for a in args if not a.startswith("-")] or ["."]
     out, errs = [], []
 
@@ -482,6 +655,14 @@ def _ls(world, args, f, tty=True):
                            f"{len(world.files[p]):>6} Aug 15 14:32 {t}")
             else:
                 out.append(t)  # a named file prints alone either way
+        elif isdir(world, p) and dironly:
+            if long:
+                if p in f["modes"]:
+                    world.flags["saw_perms"] = True
+                out.append(f"{mode_str(world, p)} 1 {USER} {USER} "
+                           f"{4096:>6} Aug 15 14:32 {t}")
+            else:
+                out.append(t)
         elif isdir(world, p):
             multi = len(targets) > 1 or rec
             out.append(listing(p, t.rstrip("/") if multi else None))
@@ -503,15 +684,46 @@ def _cp_mv(world, prog, args, f):
                     f"Try '{prog} --help' for more information.")
     *srcs, dst_raw = names
     dst = abspath(world, dst_raw)
+    # A trailing slash is a hard assertion that the target is a directory.
+    if dst_raw.endswith("/") and not isdir(world, dst):
+        # A missing path and an existing FILE are different complaints, and with
+        # several sources the target is described as a target, not a file.
+        gone = not exists(world, dst)
+        if len(srcs) > 1:
+            return fail(f"{prog}: target '{dst_raw}': "
+                        + ("No such file or directory" if gone else "Not a directory"))
+        if prog == "mv":
+            return fail(f"mv: cannot move '{srcs[0]}' to '{dst_raw}': "
+                        + ("No such file or directory" if gone else "Not a directory"))
+        return fail(f"cp: cannot create regular file '{dst_raw}': "
+                    + ("No such file or directory" if gone else "Not a directory"))
     if len(srcs) > 1 and not isdir(world, dst):
-        return fail(f"{prog}: target '{dst_raw}': Not a directory")
+        return fail(f"{prog}: target '{dst_raw}': "
+                    + ("No such file or directory" if not exists(world, dst)
+                       else "Not a directory"))
     errs = []
     for s_raw in srcs:
         src = abspath(world, s_raw)
         target = dst.rstrip("/") + "/" + src.rsplit("/", 1)[1] if isdir(world, dst) else dst
+        # `mv f .` resolves to the file itself. Writing then unlinking the same key
+        # would delete the file outright — real mv refuses every same-file spelling.
+        if src == target:
+            errs.append(f"{prog}: '{s_raw}' and '{dst_raw}"
+                        f"{'' if dst_raw.endswith('/') or not isdir(world, dst) else '/' + src.rsplit('/', 1)[1]}"
+                        f"' are the same file")
+            continue
         if isdir(world, src):
             if prog == "cp" and not rec:
                 errs.append(f"cp: -r not specified; omitting directory '{s_raw}'")
+                continue
+            # Copying a tree into a spot underneath itself would recurse forever.
+            if target == src or target.startswith(src.rstrip("/") + "/"):
+                errs.append(f"{prog}: cannot copy a directory, '{s_raw}', "
+                            f"into itself, '{dst_raw}'")
+                continue
+            if isfile(world, target):
+                errs.append(f"{prog}: cannot overwrite non-directory '{dst_raw}' "
+                            f"with directory '{s_raw}'")
                 continue
             for p in walk(world, src):
                 new = target + p[len(src):]
@@ -531,9 +743,16 @@ def _cp_mv(world, prog, args, f):
             if isdir(world, target):
                 errs.append(f"{prog}: cannot overwrite directory '{dst_raw}' with non-directory")
                 continue
+            # cp READS the source; mv only relinks it, so it needs no read bit.
+            if prog == "cp" and not readable(world, src):
+                errs.append(f"cp: cannot open '{s_raw}' for reading: Permission denied")
+                continue
             err = write_file(world, target, world.files[src])
             if err:
-                errs.append(err)
+                # write_file speaks in bash's voice for `>`; here the tool is cp/mv.
+                verb = "copy" if prog == "cp" else "move"
+                errs.append(f"{prog}: cannot {verb} '{s_raw}' to '{dst_raw}': "
+                            "No such file or directory")
                 continue
             f["modes"][target] = mode_of(world, src)
             if prog == "mv":
@@ -554,7 +773,10 @@ def _chmod(world, args, f):
 
     def apply(cur, spec):
         if re.fullmatch(r"[0-7]{3,4}", spec):
-            return int(spec[-3:], 8)
+            # A 4-digit mode carries setuid/setgid/sticky in the leading digit;
+            # dropping it would make `chmod 4755` look like plain 755.
+            special = int(spec[-4], 8) if len(spec) == 4 else 0
+            return (special << 9) | int(spec[-3:], 8)
         if "," in spec:                      # u+x,g+w — each clause in turn
             for clause in spec.split(","):
                 cur = apply(cur, clause)
@@ -614,7 +836,19 @@ def _find(world, args):
         if not exists(world, s):
             errs.append(f"find: '{s_raw}': No such file or directory")
             continue
+        if opts.get("-type") not in (None, "f", "d"):
+            return fail(f"find: Unknown argument to -type: {opts['-type']}")
+        maxdepth = None
+        if "-maxdepth" in opts:
+            if not opts["-maxdepth"].isdigit():
+                return fail(f"find: Expected a positive decimal integer argument to "
+                            f"-maxdepth, but got `{opts['-maxdepth']}'")
+            maxdepth = int(opts["-maxdepth"])
         for p in walk(world, s):
+            if maxdepth is not None:
+                depth = 0 if p == s else p[len(s.rstrip("/")):].strip("/").count("/") + 1
+                if depth > maxdepth:
+                    continue
             name = p.rsplit("/", 1)[1] or "/"
             if "-type" in opts:
                 if opts["-type"] == "f" and not isfile(world, p):
@@ -639,13 +873,82 @@ def _fnmatch(pattern, name, insensitive=False):
         return pattern == name
 
 
+def bre_to_python(pat):
+    """POSIX basic regex -> Python. In BRE `+ ? | ( ) { }` are LITERAL and their
+    backslashed forms are the operators — exactly backwards from every other
+    regex dialect, which is why `grep -E` exists and why students get bitten."""
+    out, i, n = "", 0, len(pat)
+    while i < n:
+        ch = pat[i]
+        if ch == "[":                       # bracket expression: copy verbatim
+            j = i + 1
+            if j < n and pat[j] == "^":
+                j += 1
+            if j < n and pat[j] == "]":
+                j += 1
+            while j < n and pat[j] != "]":
+                j += 1
+            if j >= n:                      # unterminated — grep errors on this
+                raise re.error("Invalid regular expression" if j == i + 1
+                               else "Unmatched [, [^, [:, [., or [=")
+            out += pat[i:j + 1]
+            i = j + 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            nxt = pat[i + 1]
+            out += nxt if nxt in "+?|(){}" else "\\" + nxt
+            i += 2
+            continue
+        out += re.escape(ch) if ch in "+?|(){}" else ch
+        i += 1
+    return out
+
+
+# Python's regex complaints name Python constructs; grep's name POSIX ones.
+_REGEX_ERRORS = (
+    ("unterminated subpattern", "Unmatched ( or \\("),
+    ("unbalanced parenthesis", "Unmatched ) or \\)"),
+    ("unterminated character set", "Unmatched [, [^, [:, [., or [="),
+    ("nothing to repeat", "Invalid preceding regular expression"),
+    ("bad character range", "Invalid range end"),
+)
+
+
+def _regex_error(exc):
+    msg = str(exc).split(" at position")[0]
+    if msg.startswith(("Unmatched", "Invalid")):
+        return msg                          # already raised in grep's own words
+    for needle, grep_says in _REGEX_ERRORS:
+        if needle in msg:
+            return grep_says
+    return "Invalid regular expression"
+
+
 def _grep(world, args, stdin):
     flags = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
     names = [a for a in args if not a.startswith("-")]
     if not names:
-        return fail("usage: grep [OPTION]... PATTERN [FILE]...")
+        return fail("usage: grep [OPTION]... PATTERN [FILE]...", 2)
     pattern, files = names[0], names[1:]
+
+    # -F fixed string · -E extended regex · default is POSIX BRE, like real grep.
+    try:
+        if "F" in flags:
+            rx = re.compile(re.escape(pattern), re.I if "i" in flags else 0)
+        else:
+            body = pattern if "E" in flags else bre_to_python(pattern)
+            if "w" in flags:
+                body = r"\b(?:" + body + r")\b"
+            rx = re.compile(body, re.I if "i" in flags else 0)
+    except re.error as e:
+        return fail(f"grep: {_regex_error(e)}", 2)
+
+    def selected(line):
+        # real grep is CASE-SENSITIVE unless -i. Getting this wrong would teach
+        # a habit that fails the moment it matters.
+        return bool(rx.search(line)) != ("v" in flags)
     sources = []
+    errs = []
     if files:
         for fn in files:
             p = abspath(world, fn)
@@ -655,17 +958,26 @@ def _grep(world, args, stdin):
                         if isfile(world, q):
                             sources.append((fn.rstrip("/") + q[len(p):], world.files[q]))
                 else:
-                    sources.append((fn, None))
+                    errs.append(f"grep: {fn}: Is a directory")
             elif isfile(world, p):
-                sources.append((fn, world.files[p]))
+                if readable(world, p):
+                    sources.append((fn, world.files[p]))
+                else:
+                    errs.append(f"grep: {fn}: Permission denied")
             else:
                 sources.append((fn, None))
     elif stdin is not None:
         sources = [(None, stdin)]
     else:
-        return fail("usage: grep [OPTION]... PATTERN [FILE]...")
+        return fail("usage: grep [OPTION]... PATTERN [FILE]...", 2)
 
-    out, errs, hits = [], [], 0
+    def lines_of(body):
+        ls = body.split("\n")
+        if ls and ls[-1] == "":
+            ls.pop()                        # a trailing newline is not a line
+        return ls
+
+    out, hits, matched_files = [], 0, []
     # real grep prefixes the filename whenever more than one file is in play —
     # and -r always is, even when it matches exactly one file.
     many = len(sources) > 1 or ("r" in flags and files)
@@ -673,17 +985,27 @@ def _grep(world, args, stdin):
         if body is None:
             errs.append(f"grep: {label}: No such file or directory")
             continue
-        for i, line in enumerate(body.split("\n"), 1):
-            # real grep is CASE-SENSITIVE unless -i. Getting this wrong would
-            # teach a habit that fails the moment it matters.
-            found = (pattern.lower() in line.lower()) if "i" in flags else (pattern in line)
-            if found != ("v" in flags):
+        for i, line in enumerate(lines_of(body), 1):
+            if selected(line):
                 hits += 1
+                if label is not None and label not in matched_files:
+                    matched_files.append(label)
                 prefix = f"{label}:" if many else ""
                 out.append(f"{prefix}{i}:{line}" if "n" in flags else prefix + line)
+    code = 2 if errs else (0 if hits else 1)
+    if "q" in flags:                        # -q: exit status only, say nothing
+        return Res("", "\n".join(errs), code)
+    if "l" in flags:                        # -l: the FILE names, once each
+        return Res("\n".join(matched_files), "\n".join(errs), code)
     if "c" in flags:
-        return Res(str(hits), "\n".join(errs), 0 if hits else 1)
-    return Res("\n".join(out), "\n".join(errs), 0 if hits else 1)
+        rows = []
+        for label, body in sources:
+            if body is None:
+                continue
+            n = sum(1 for line in lines_of(body) if selected(line))
+            rows.append(f"{label}:{n}" if many else str(n))
+        return Res("\n".join(rows), "\n".join(errs), code)
+    return Res("\n".join(out), "\n".join(errs), code)
 
 
 def _read_input(world, args, stdin, prog):
@@ -695,6 +1017,8 @@ def _read_input(world, args, stdin, prog):
             return None, f"{prog}: error reading '{names[-1]}': Is a directory"
         if not isfile(world, p):
             return None, f"{prog}: cannot open '{names[-1]}' for reading: No such file or directory"
+        if not readable(world, p):
+            return None, f"{prog}: {names[-1]}: Permission denied"
         return world.files[p], None
     if stdin is not None:
         return stdin, None
@@ -712,18 +1036,22 @@ def _tar(world, io, args, f):
         return fail("tar: You must specify one of the '-Acdtrux', '--delete' or '--test-label' options\n"
                     "Try 'tar --help' or 'tar --usage' for more information.")
     if "f" not in flags:
-        return fail("tar: Refusing to read archive contents from terminal (missing -f option?)")
+        return fail("tar: Refusing to read archive contents from terminal (missing -f option?)", 2)
+    if not names:
+        return fail("tar: option requires an argument -- 'f'\n"
+                    "Try 'tar --help' or 'tar --usage' for more information.", 2)
 
     if "c" in flags:
         if len(names) < 2:
-            return fail("tar: Cowardly refusing to create an empty archive")
+            return fail("tar: Cowardly refusing to create an empty archive\n"
+                        "Try 'tar --help' or 'tar --usage' for more information.", 2)
         archive, srcs = abspath(world, names[0]), names[1:]
         members = []
         for s_raw in srcs:
             s = abspath(world, s_raw)
             if not exists(world, s):
                 return fail(f"tar: {s_raw}: Cannot stat: No such file or directory\n"
-                            "tar: Exiting with failure status due to previous errors")
+                            "tar: Exiting with failure status due to previous errors", 2)
             # tar stores member names as GIVEN: `tar -cf d.tar d` records "d/…",
             # not the absolute path. Storing "path\tstored" keeps both.
             base = s_raw.rstrip("/")
@@ -749,8 +1077,14 @@ def _tar(world, io, args, f):
 
     archive = abspath(world, names[0]) if names else None
     if not archive or not isfile(world, archive):
-        return fail(f"tar: {names[0] if names else '?'}: Cannot open: No such file or directory\n"
-                    "tar: Error is not recoverable: exiting now")
+        # With -z the decompressor is a CHILD process, so the complaint comes
+        # from it first and tar reports the child's status afterwards.
+        who = "tar (child)" if "z" in flags else "tar"
+        msg = (f"{who}: {names[0] if names else '?'}: Cannot open: No such file or directory\n"
+               f"{who}: Error is not recoverable: exiting now")
+        if "z" in flags:
+            msg += "\ntar: Child returned status 2\ntar: Error is not recoverable: exiting now"
+        return fail(msg, 2)
     body = world.files[archive]
     if archive.endswith(".gz") and "z" not in flags:
         io.print(c("(GNU tar sniffed the gzip magic and decompressed anyway — `-z` is the "
@@ -759,7 +1093,7 @@ def _tar(world, io, args, f):
         entries = json.loads(body)
     except ValueError:
         return fail(f"tar: {names[0]}: This does not look like a tar archive\n"
-                    "tar: Exiting with failure status due to previous errors")
+                    "tar: Exiting with failure status due to previous errors", 2)
 
     def _perm(mode, d):
         out = "d" if d else "-"
@@ -791,8 +1125,22 @@ def _tar(world, io, args, f):
     return ok("\n".join(e["name"] for e in entries) if "v" in flags else "")
 
 
-def run_script(world, io, path, explicit=False, shown=None):
-    """Run a shell script: the shebang + echo lines a class-1 script contains."""
+class _Sink:
+    """Collects a script's output so it can be piped or redirected like any
+    other command's, instead of escaping straight to the screen."""
+
+    def __init__(self, io):
+        self.lines, self._io = [], io
+
+    def print(self, *args):
+        self.lines.append(" ".join(str(a) for a in args))
+
+    def input(self, prompt=""):
+        return self._io.input(prompt)
+
+
+def run_script(world, io, path, explicit=False, shown=None, script_args=()):
+    """Run a shell script: its lines, through this same shell."""
     shown = shown or path
     if not isfile(world, path):
         return fail(f"bash: {shown}: No such file or directory", 127)
@@ -802,27 +1150,61 @@ def run_script(world, io, path, explicit=False, shown=None):
         io.print(c("   (the file exists — it just isn't executable yet. `chmod +x` adds the x bit; "
                    "`bash <file>` runs it without one)", "dim"))
         return ok()
-    out = []
-    for line in world.files[path].split("\n"):
-        line = expand_vars(world, line.strip())
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith(("echo ", "printf ")):
-            body = line.split(" ", 1)[1].strip()
-            interp = body.startswith("-e ")
-            if interp:
-                body = body[3:].strip()
-            text = body.strip("\"'")
-            out.append(text.replace("\\n", "\n") if interp or line.startswith("printf") else text)
+    # A script is not a special dialect — it is these same lines, run in order.
+    # Running them for real is what makes `exit 3`, `$1` and a pipeline inside a
+    # script behave the way the assignment expects.
+    f = st(world)
+    saved = (f.get("script_args"), f.get("script_name"))
+    f["script_args"], f["script_name"] = list(script_args), shown
+    sink = _Sink(io)
+    code = 0
+    try:
+        for raw in world.files[path].split("\n"):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            bye = re.fullmatch(r"exit(?:\s+(\d+))?", line)
+            if bye:
+                code = int(bye.group(1)) if bye.group(1) else f.get("last_code", 0)
+                break
+            code = run_line(world, sink, line)
+    finally:
+        f["script_args"], f["script_name"] = saved
+        f["last_code"] = code
     world.flags["ran_script"] = path
-    return ok("\n".join(out))
+    return Res("\n".join(sink.lines), "", code)
 
 
 # ------------------------------------------------------------------ dispatch --
+PATH_TAKING = {"ls", "cd", "mkdir", "rmdir", "touch", "cat", "cp", "mv", "rm", "chmod",
+               "find", "head", "tail", "wc", "sort", "uniq", "gzip", "gunzip", "edit",
+               "less", "more", "du", "cut", "tac"}
+
+
 def run_cmd(world, io, argv, stdin=None, tty=True):
     """One command. Returns Res, or FALLTHROUGH if this shell doesn't own it."""
     f = st(world)
     prog, args = argv[0], argv[1:]
+
+    # You are root in this world, so `sudo` is a no-op wrapper — but it must still
+    # RUN the command, or half the class-1 muscle memory would silently do nothing.
+    if prog == "sudo":
+        args = [a for a in args if a not in ("-E", "-H", "-i", "-s", "--")]
+        if not args:
+            return fail("usage: sudo [-E] [-H] command [args]", 1)
+        io.print(c("(you're already root here, so sudo changes nothing — running it anyway. "
+                   "On your own box it's what stands between a typo and a broken system)", "dim"))
+        return run_cmd(world, io, args, stdin=stdin, tty=tty)
+
+    # "" resolves to the cwd, which would make `rm ""` or `mkdir ""` do something
+    # surprising. Every real tool rejects it outright.
+    if prog in PATH_TAKING and any(a == "" for a in args):
+        if prog == "cd":
+            return fail("bash: cd: null directory")
+        verb = {"ls": "cannot access", "cat": "", "rm": "cannot remove",
+                "mkdir": "cannot create directory", "rmdir": "failed to remove",
+                "touch": "cannot touch", "chmod": "cannot access"}.get(prog, "cannot access")
+        return fail(f"{prog}: {verb + ' ' if verb else ''}'': No such file or directory")
 
     if prog == "pwd":
         return ok(f["cwd"])
@@ -891,37 +1273,141 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
                     errs.append(f"touch: cannot touch '{t}': No such file or directory")
         return Res("", "\n".join(errs), 1 if errs else 0)
 
-    if prog in ("echo", "printf"):
-        interp = bool(args) and args[0] == "-e" or prog == "printf"
-        body = args[1:] if (args and args[0] == "-e") else args
-        text = " ".join(body)
-        if interp:
-            text = text.replace("\\n", "\n").replace("\\t", "\t")
-        return ok(text)
+    if prog == "echo":
+        # bash's builtin: leading -n/-e/-E (and combos like -ne) are flags, and
+        # flag parsing stops at the first word that isn't one.
+        interp, nonl, i = False, False, 0
+        while i < len(args) and re.fullmatch(r"-[neE]+", args[i]):
+            if "n" in args[i]:
+                nonl = True
+            if "e" in args[i]:
+                interp = True
+            if "E" in args[i]:
+                interp = False
+            i += 1
+        text = " ".join(args[i:])
+        text = _unescape(text) if interp else text
+        # `echo -n` is how you write a file with no trailing newline.
+        return Res(out=text, nonl=nonl)
+
+    if prog == "printf":
+        if not args:
+            return fail("printf: usage: printf [-v var] format [arguments]", 2)
+        return stream(_printf(args[0], args[1:]))
+
+    if prog == "seq":
+        nums = [a for a in args if not a.startswith("-") or _num(a)]
+        if not nums or not all(_num(x) for x in nums) or len(nums) > 3:
+            return fail(f"seq: invalid floating point argument: '{(nums or args or [''])[0]}'\n"
+                        "Try 'seq --help' for more information.")
+        vals = [float(x) for x in nums]
+        lo, step, hi = (1.0, 1.0, vals[0]) if len(vals) == 1 else \
+            (vals[0], 1.0, vals[1]) if len(vals) == 2 else (vals[0], vals[1], vals[2])
+        if step == 0:
+            return fail("seq: invalid Zero increment value: '0'")
+        out, cur = [], lo
+        while (cur <= hi + 1e-9) if step > 0 else (cur >= hi - 1e-9):
+            out.append(str(int(cur)) if cur == int(cur) else f"{cur:g}")
+            cur += step
+        return ok("\n".join(out))
+
+    if prog == "cut":
+        delim, fields, chars = "\t", None, None
+        rest = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a.startswith("-d"):
+                delim = a[2:] or (args[i + 1] if i + 1 < len(args) else "\t")
+                i += 1 if a[2:] else 2
+                continue
+            if a.startswith("-f") or a.startswith("-c"):
+                spec = a[2:] or (args[i + 1] if i + 1 < len(args) else "")
+                if a[1] == "f":
+                    fields = spec
+                else:
+                    chars = spec
+                i += 1 if a[2:] else 2
+                continue
+            rest.append(a)
+            i += 1
+        if fields is None and chars is None:
+            return fail("cut: you must specify a list of bytes, characters, or fields\n"
+                        "Try 'cut --help' for more information.")
+        spec = fields if fields is not None else chars
+        try:
+            wanted = _index_list(spec)
+        except ValueError:
+            kind = "field" if fields is not None else "byte/character"
+            return fail(f"cut: invalid {kind} value '{spec}'\n"
+                        "Try 'cut --help' for more information.", 1)
+        body, err = _read_input(world, rest, stdin, "cut")
+        if err:
+            # cut names the file plainly, unlike head/tail's longer phrasing.
+            return fail(re.sub(r"cut: cannot open '(.+)' for reading: ", r"cut: \1: ", err))
+        lines = body.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        out = []
+        for line in lines:
+            if chars is not None:
+                out.append("".join(line[i - 1] for i in wanted if i <= len(line)))
+            elif delim not in line:
+                out.append(line)          # a line with no delimiter passes through
+            else:
+                parts = line.split(delim)
+                out.append(delim.join(parts[i - 1] for i in wanted if i <= len(parts)))
+        return ok("\n".join(out))
+
+    if prog == "tac":
+        body, err = _read_input(world, args, stdin, "tac")
+        if err:
+            return fail(err)
+        lines = body.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        return ok("\n".join(reversed(lines)))
+
+    if prog in ("basename", "dirname"):
+        if not args:
+            return fail(f"{prog}: missing operand\nTry '{prog} --help' for more information.")
+        p = args[0].rstrip("/") or "/"
+        if prog == "basename":
+            name = p.rsplit("/", 1)[-1] or "/"
+            if len(args) > 1 and name.endswith(args[1]) and name != args[1]:
+                name = name[:-len(args[1])]      # basename path .ext
+            return ok(name)
+        return ok(p.rsplit("/", 1)[0] or "/" if "/" in p else ".")
 
     if prog == "cat":
         names = [a for a in args if not a.startswith("-")]
         if not names:
             if stdin is not None:
-                return ok(stdin)
+                return stream(stdin)
             world.flags["_noop"] = True
             io.print(c("(cat with no file reads from the keyboard — in this shell, give it a "
                        "filename: cat notes.txt)", "dim"))
             return ok()
-        out, errs = [], []
+        # cat concatenates the raw bytes: whatever trailing newline each file
+        # has (or doesn't) is exactly what comes out.
+        blob, errs = "", []
         for t in names:
             p = abspath(world, t)
             if isfile(world, p):
-                if p.endswith((".tar", ".tar.gz", ".tgz", ".gz")):
-                    out.append(c(f"(binary archive — {len(world.files[p])} bytes. "
-                                 f"Look inside with: tar -tvf {t})", "dim"))
+                if not readable(world, p):
+                    errs.append(f"cat: {t}: Permission denied")
+                elif p.endswith((".tar", ".tar.gz", ".tgz", ".gz")):
+                    blob += c(f"(binary archive — {len(world.files[p])} bytes. "
+                              f"Look inside with: tar -tvf {t})", "dim") + "\n"
                 else:
-                    out.append(world.files[p])
+                    blob += world.files[p]
             elif isdir(world, p):
                 errs.append(f"cat: {t}: Is a directory")
             else:
                 errs.append(f"cat: {t}: No such file or directory")
-        return Res("\n".join(out), "\n".join(errs), 1 if errs else 0)
+        res = stream(blob)
+        res.err, res.code = "\n".join(errs), 1 if errs else 0
+        return res
 
     if prog in ("less", "more"):
         names = [a for a in args if not a.startswith("-")]
@@ -948,8 +1434,22 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
         errs = []
         for t in names:
             p = abspath(world, t)
+            if p == "/" and rec:
+                io.print(c("   (this refusal is real, and it is the most important thing rm "
+                           "does. --no-preserve-root removes it — never type that.)", "dim"))
+                return fail("rm: it is dangerous to operate recursively on '/'\n"
+                            "rm: use --no-preserve-root to override this failsafe")
             if isdir(world, p):
                 if not rec:
+                    # -d removes an EMPTY directory, like rmdir; without it, rm
+                    # refuses directories outright.
+                    if "d" in flags:
+                        if len(walk(world, p)) > 1:
+                            errs.append(f"rm: cannot remove '{t}': Directory not empty")
+                        else:
+                            f["dirs"].discard(p)
+                            f["modes"].pop(p, None)
+                        continue
                     errs.append(f"rm: cannot remove '{t}': Is a directory")
                     continue
                 for q in walk(world, p):
@@ -980,26 +1480,49 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
         return _grep(world, args, stdin)
 
     if prog == "wc":
-        body, err = _read_input(world, args, stdin, "wc")
-        if err:
-            return fail(err)
-        lines = body.split("\n")
-        nl = len(lines) - (1 if lines and lines[-1] == "" else 0)
         flags = "".join(a[1:] for a in args if a.startswith("-"))
         named = [a for a in args if not a.startswith("-")]
-        tail = f" {named[-1]}" if named else ""
-        if flags == "l":
-            return ok(f"{nl}{tail}")
-        if flags == "w":
-            return ok(f"{len(body.split())}{tail}")
-        if flags == "c":
-            return ok(f"{len(body)}{tail}")
-        return ok(f"{nl:>7} {len(body.split()):>7} {len(body):>7}{tail}")
+
+        def counts(text):
+            ls = text.split("\n")
+            return (len(ls) - (1 if ls and ls[-1] == "" else 0),
+                    len(text.split()), len(text))
+
+        def render(nl, nw, nc, label):
+            tail = f" {label}" if label else ""
+            if flags == "l":
+                return f"{nl}{tail}"
+            if flags == "w":
+                return f"{nw}{tail}"
+            if flags == "c":
+                return f"{nc}{tail}"
+            return f"{nl:>7} {nw:>7} {nc:>7}{tail}"
+
+        if not named:
+            if stdin is None:
+                return fail("wc: needs a file argument or piped input here")
+            return ok(render(*counts(stdin), ""))
+        rows, errs, tot = [], [], [0, 0, 0]
+        for name in named:
+            p = abspath(world, name)
+            if isdir(world, p):
+                errs.append(f"wc: {name}: Is a directory")
+                rows.append(render(0, 0, 0, name))
+                continue
+            if not isfile(world, p):
+                errs.append(f"wc: {name}: No such file or directory")
+                continue
+            if not readable(world, p):
+                errs.append(f"wc: {name}: Permission denied")
+                continue
+            nl, nw, nc = counts(world.files[p])
+            tot = [tot[0] + nl, tot[1] + nw, tot[2] + nc]
+            rows.append(render(nl, nw, nc, name))
+        if len(named) > 1:
+            rows.append(render(tot[0], tot[1], tot[2], "total"))
+        return Res("\n".join(rows), "\n".join(errs), 1 if errs else 0)
 
     if prog in ("head", "tail"):
-        body, err = _read_input(world, args, stdin, prog)
-        if err:
-            return fail(err)
         n = 10
         for i, a in enumerate(args):
             if a == "-n":
@@ -1012,20 +1535,51 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
                 n = int(raw.lstrip("+-"))
             elif re.fullmatch(r"-\d+", a):
                 n = int(a[1:])
-        lines = body.split("\n")
-        if lines and lines[-1] == "":
-            lines.pop()                       # a trailing newline is a terminator,
-        return ok("\n".join(lines[:n] if prog == "head" else lines[-n:]))
+        named = [a for a in args if not a.startswith("-") and not re.fullmatch(r"\d+", a)]
+
+        def slice_of(text):
+            lines = text.split("\n")
+            if lines and lines[-1] == "":
+                lines.pop()                   # a trailing newline terminates, not adds
+            if n == 0:
+                return ""                     # `tail -n 0` means zero lines, not all
+            return "\n".join(lines[:n] if prog == "head" else lines[-n:])
+
+        if not named:
+            if stdin is None:
+                return fail(f"{prog}: needs a file argument or piped input here")
+            return ok(slice_of(stdin))
+        blocks, errs = [], []
+        for i, name in enumerate(named):
+            p = abspath(world, name)
+            if isdir(world, p):
+                errs.append(f"{prog}: error reading '{name}': Is a directory")
+                continue
+            if not isfile(world, p):
+                errs.append(f"{prog}: cannot open '{name}' for reading: "
+                            "No such file or directory")
+                continue
+            if not readable(world, p):
+                errs.append(f"{prog}: cannot open '{name}' for reading: Permission denied")
+                continue
+            if len(named) > 1:
+                blocks.append(("\n" if i else "") + f"==> {name} <==")
+            blocks.append(slice_of(world.files[p]))
+        return Res("\n".join(blocks), "\n".join(errs), 1 if errs else 0)
 
     if prog == "sort":
         body, err = _read_input(world, args, stdin, "sort")
         if err:
             return fail(err)
-        lines = [x for x in body.split("\n")]
+        lines = body.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()                      # the trailing newline is not a line
         flags = "".join(a[1:] for a in args if a.startswith("-"))
-        keyed = sorted(lines, key=lambda s: (float(s.split()[0]) if "n" in flags and s.split()
-                                             and _num(s.split()[0]) else 0, s)) \
-            if "n" in flags else sorted(lines)
+        # -n compares the leading number; lines that aren't numbers all tie at 0
+        # and then fall back to the same dictionary order as a plain sort.
+        keyed = sorted(lines, key=lambda s: (float(s.split()[0]) if s.split()
+                                             and _num(s.split()[0]) else 0, collate(s))) \
+            if "n" in flags else sorted(lines, key=collate)
         if "r" in flags:
             keyed = list(reversed(keyed))
         if "u" in flags:
@@ -1200,13 +1754,16 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
         return ok()
 
     if prog == "ping":
-        host = next((a for a in args if not a.startswith("-")), "google.com")
-        count = None
+        # A flag's VALUE is not the hostname — skip it when picking the target.
+        count, skip = None, set()
         for i, a in enumerate(args):
             if a == "-c" and i + 1 < len(args):
                 count = args[i + 1]
+                skip.add(i + 1)
             elif re.fullmatch(r"-c\d+", a):
                 count = a[2:]
+        host = next((a for i, a in enumerate(args)
+                     if not a.startswith("-") and i not in skip), "google.com")
         if count is None:
             world.flags["_noop"] = True
             io.print(f"PING {host} (142.250.185.78) 56(84) bytes of data.")
@@ -1215,7 +1772,19 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
             io.print(c("   (no -c means ping runs FOREVER — you'd sit there until Ctrl+C. "
                        f"Bound it: ping -c 4 {host})", "dim"))
             return ok()
-        return ok(PING4 if count == "4" else PING4.replace("4 packets", f"{count} packets"))
+        try:
+            n = max(1, int(count))
+        except ValueError:
+            return fail(f"ping: bad number of packets to transmit: '{count}'")
+        rows = [f"PING {host} (142.250.185.78) 56(84) bytes of data."]
+        times = [12.4, 11.9, 12.7, 12.1, 12.5, 11.8, 12.9, 12.2]
+        for i in range(n):
+            rows.append(f"64 bytes from {host}: icmp_seq={i + 1} ttl=117 "
+                        f"time={times[i % len(times)]} ms")
+        rows += ["", f"--- {host} ping statistics ---",
+                 f"{n} packets transmitted, {n} received, 0% packet loss, "
+                 f"time {n * 1001 + 2}ms"]
+        return ok("\n".join(rows))
 
     if prog == "crontab":
         if any(a.startswith("-") and "l" in a for a in args):
@@ -1299,7 +1868,14 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
             try:
                 ln = io.input("… ")
             except EOFError:
+                io.print(c("(end of input — saving what you typed)", "dim"))
                 break
+            except KeyboardInterrupt:
+                # Real `cat > file` aborts on Ctrl+C and hands the prompt back.
+                # It must never take the whole session down with it.
+                io.print(c("^C  (edit cancelled — nothing written)", "yellow"))
+                world.flags["_noop"] = True
+                return ok()
             if ln.strip() == ".":
                 break
             lines.append(ln)
@@ -1358,11 +1934,15 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
         out, missing = [], False
         for t in names:
             if t in ON_PATH:
-                out.append(f"/usr/bin/{t}" if prog != "type" else f"{t} is /usr/bin/{t}")
+                out.append(f"{t} is /usr/bin/{t}" if prog == "type" else f"/usr/bin/{t}")
             else:
                 missing = True
-                out.append(f"{prog}: no {t} in (/usr/local/bin:/usr/bin:/bin)"
-                           if prog == "which" else "")
+                # `command -v` and `type` say nothing on failure — that silence is
+                # exactly why scripts test them instead of `which`.
+                if prog == "which":
+                    out.append(f"which: no {t} in (/usr/local/bin:/usr/bin:/bin)")
+                elif prog == "type":
+                    out.append(f"bash: type: {t}: not found")
         if not missing and prog == "which":
             io.print(c("(on PATH = installed. This is the check to run BEFORE any install step)",
                        "dim"))
@@ -1396,10 +1976,11 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
         return ok()
 
     if prog in ("bash", "sh") and args:
-        return run_script(world, io, abspath(world, args[0]), explicit=True)
+        return run_script(world, io, abspath(world, args[0]), explicit=True,
+                          shown=args[0], script_args=args[1:])
 
     if prog.startswith(("./", "/", "~/")) or prog.startswith("../"):
-        return run_script(world, io, abspath(world, prog), shown=prog)
+        return run_script(world, io, abspath(world, prog), shown=prog, script_args=args)
 
     return FALLTHROUGH
 
@@ -1412,11 +1993,98 @@ def _num(s):
         return False
 
 
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b",
+            "f": "\f", "v": "\v", "0": "\0", "\\": "\\"}
+
+
+def _unescape(text):
+    """The backslash escapes `echo -e` and `printf` interpret."""
+    out, i = "", 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt in _ESCAPES:
+                out += _ESCAPES[nxt]
+                i += 2
+                continue
+        out += text[i]
+        i += 1
+    return out
+
+
+def _printf(fmt, args):
+    """printf's real contract: escapes are always interpreted, and the format is
+    REUSED until the arguments run out — which is why `printf '%s\\n' a b c`
+    prints three lines, not one."""
+    fields = re.findall(r"%[-+ #0]*\d*(?:\.\d+)?[sdifgxXoc%]", fmt)
+    slots = [f for f in fields if f != "%%"]
+    if not slots:                            # `printf 'done\n'` — one pass only
+        return _unescape(fmt.replace("%%", "%"))
+    out, i = "", 0
+    args = list(args) or [""]
+    while True:
+        chunk, used = fmt, 0
+        def sub(m, _slots=slots):
+            nonlocal used
+            spec = m.group(0)
+            if spec == "%%":
+                return "%"
+            val = args[i + used] if i + used < len(args) else ""
+            used += 1
+            if spec[-1] in "difxXoc":
+                try:
+                    val = int(float(val or 0))
+                except ValueError:
+                    val = 0
+                return spec % val
+            return spec % str(val)
+        chunk = re.sub(r"%[-+ #0]*\d*(?:\.\d+)?[sdifgxXoc%]", sub, chunk)
+        out += _unescape(chunk)
+        i += used or len(slots)
+        if i >= len(args):
+            break
+    return out
+
+
+def _index_list(spec):
+    """cut's `1`, `1,3`, `2-4`, `3-` — 1-based, in ascending order like cut's."""
+    want = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(spec)
+        if "-" in part:
+            lo, _, hi = part.partition("-")
+            lo = int(lo) if lo else 1
+            hi = int(hi) if hi else 4096
+            if lo < 1 or hi < lo:
+                raise ValueError(spec)
+            want.update(range(lo, hi + 1))
+        else:
+            n = int(part)
+            if n < 1:
+                raise ValueError(spec)
+            want.add(n)
+    return sorted(want)
+
+
+def collate(s):
+    """glibc's dictionary collation, which is what `sort` actually does on a
+    UTF-8 desktop: punctuation is ignored first, then case breaks the tie. Plain
+    codepoint order would put `Gamma` before `alpha` — students see the opposite.
+    """
+    primary = [ch.lower() for ch in s if ch.isalnum()]
+    case = [0 if ch.islower() else 1 for ch in s if ch.isalpha()]
+    return (primary, case, s)
+
+
 # ------------------------------------------------------------------- shell --
-def _exec_pipeline(world, io, stages, background):
-    """Run one pipeline (already split on |). Returns the exit code."""
+def _exec_pipeline(world, io, stages, background, pipe_ops=()):
+    """Run one pipeline (already split on | / |&). Returns the exit code."""
     piped, code = None, 0
     for i, words in enumerate(stages):
+        # `a |& b` pipes stderr into b as well as stdout; plain `|` does not.
+        merges_err = i < len(pipe_ops) and pipe_ops[i] == "|&"
         argv, redirs, syn = expand_argv(world, words, io)
         if syn:
             io.print(syn)
@@ -1430,7 +2098,13 @@ def _exec_pipeline(world, io, stages, background):
                 if not isfile(world, p):
                     io.print(f"bash: {target}: No such file or directory")
                     return 1
+                if not readable(world, p):
+                    io.print(f"bash: {target}: Permission denied")
+                    return 1
                 stdin = world.files[p]
+        # 2>&1 / 1>&2 — duplicating a descriptor, not opening a file.
+        dup_err_to_out = any(op == "2>&1" for op, _ in redirs)
+        dup_out_to_err = any(op == "1>&2" for op, _ in redirs)
         if background and argv[0] == "sleep":
             world.flags["_bg_next"] = True
         is_last = i == len(stages) - 1
@@ -1442,20 +2116,31 @@ def _exec_pipeline(world, io, stages, background):
         code = res.code
         err_target = next((t for op, t in redirs if re.fullmatch(r"\d>>?", op)
                            and op[0] == "2"), None)
+        out = res.out
+        if dup_err_to_out and res.err:      # stderr joins stdout, in stream order
+            out = (res.err + "\n" + out) if out else res.err
+            res = Res(out, "", res.code)
+        elif dup_out_to_err and out:
+            res = Res("", (res.err + "\n" + out) if res.err else out, res.code)
+            out = ""
         if res.err:
             if err_target:
                 if err_target not in ("/dev/null", "/dev/zero"):
-                    write_file(world, abspath(world, err_target), res.err)
+                    write_file(world, abspath(world, err_target), res.err + "\n")
+            elif merges_err:
+                out = (res.err + "\n" + out) if out else res.err
             else:
                 io.print(res.err)
-        out = res.out
         wrote = False
+        # A file records the stream verbatim: `echo a > f` is two bytes,
+        # `printf a > f` is one. That difference is what `wc -c` measures.
+        blob = out + ("" if res.nonl else "\n") if (out or res.nonl) else ""
         for op, target in redirs:
             if op in (">", ">>"):
                 if target in ("/dev/null", "/dev/zero"):
                     wrote = True
                     continue
-                err = write_file(world, abspath(world, target), out, append=(op == ">>"))
+                err = write_file(world, abspath(world, target), blob, append=(op == ">>"))
                 if err:
                     io.print(re.sub(r"bash: \S+:", f"bash: {target}:", err))
                     return 1
@@ -1465,30 +2150,45 @@ def _exec_pipeline(world, io, stages, background):
                 io.print(out)
             piped = None
         else:
-            piped = out
+            # A pipe carries the stream, terminator and all — which is why
+            # `echo hi | wc -c` counts 3, not 2.
+            piped = blob
     return code
 
 
-def shell(world, m, io):
-    """Catch-all handler: the Linux missions' shell. One typed line in."""
+def run_line(world, io, line):
+    """One command line, start to finish. Returns its exit code.
+
+    Typed at the prompt or read from a script — same code path, which is the
+    only way a script can behave like the commands it is made of.
+    """
     f = st(world)
-    line = m.group(0).strip()
+    line = line.strip()
     if not line:
-        return
+        return f.get("last_code", 0)
 
     words = tokenize(line)
     if words is None:
         io.print("bash: unexpected EOF while looking for matching quote")
         world.flags["_noop"] = True
-        return
+        return 2
+
+    syn = check_syntax(words)
+    if syn:
+        io.print(syn)
+        world.flags["_noop"] = True
+        return 2
 
     background = bool(words) and words[-1][0] == "&" and not words[-1][1]
     if background:
         words = words[:-1]
+    # `sleep 5 & ls` is legal bash — & separates as well as backgrounds. This
+    # shell only models the trailing form, so say so instead of guessing.
     if any(w == "&" and not qd for w, qd, _ in words):
-        io.print("bash: syntax error near unexpected token `&'")
+        io.print(c("(this shell backgrounds with a TRAILING `&` only — `cmd &` on its own. "
+                   "Real bash also lets `&` separate mid-line: `sleep 5 & ls`)", "dim"))
         world.flags["_noop"] = True
-        return
+        return f.get("last_code", 0)
 
     chains, ops = split_on(words, {";", "&&", "||"})
     code = f.get("last_code", 0)
@@ -1499,18 +2199,56 @@ def shell(world, m, io):
                 continue
             if prev_op == "||" and code == 0:
                 continue
-        stages, _ = split_on(chain, {"|"})
-        stages = [s for s in stages if s]
-        if not stages:
+        stages, pipe_ops = split_on(chain, {"|", "|&"})
+        if not any(stages):
             continue
-        code = _exec_pipeline(world, io, stages, background)
+        code = _exec_pipeline(world, io, stages, background, pipe_ops)
         f["last_code"] = code
+    return code
+
+
+def shell(world, m, io):
+    """Catch-all handler: the Linux missions' shell. One typed line in."""
+    run_line(world, io, m.group(0).strip())
+
+
+# The engine's atlas answers in docker's dialect ("top? — that's docker ps"), which
+# is right in a container mission and wrong in this one. These come first here.
+LINUX_LESSONS = {
+    "top": ("🌍 `top` is a live, full-screen process viewer — this shell can't paint one.",
+            "the non-interactive equivalent works here: ps aux  (add `| grep <name>` to filter)"),
+    "htop": ("🌍 `htop` is `top` with colours — not installed by default on Fedora.",
+             "sudo dnf install htop on a real box; here: ps aux"),
+    "ssh": ("🌍 `ssh` opens a shell on ANOTHER machine — this world is a single host.",
+            "it's how the Class 1 extra exercise reaches tty.sdf.org: ssh user@host"),
+    "scp": ("🌍 `scp` copies files BETWEEN machines over ssh.",
+            "scp file user@host:/path  — locally, `cp` is the one you want"),
+    "curl": ("🌍 `curl` fetches a URL — there's no network service in this mission.",
+             "the Docker missions publish a port and then curl it"),
+    "wget": ("🌍 `wget` downloads a URL to a file.",
+             "no network here; the Docker missions are where fetching happens"),
+    "awk": ("🌍 `awk` is a whole text-processing language — deliberately not simulated.",
+            "for class 1, grep + cut + sort cover the same ground; learn awk properly later"),
+    "sed": ("🌍 `sed` edits streams with a mini-language — deliberately not simulated.",
+            "here: `edit <file>` to change a file by hand, grep to filter"),
+    "tr": ("🌍 `tr` translates or deletes characters — not simulated here.",
+           "e.g. tr 'a-z' 'A-Z' upper-cases a stream"),
+    "nano": ("🌍 `nano` is a real editor — this world ships a tiny one: edit <file>",
+             "type your lines, then a single `.` on its own line to save"),
+    "man": ("🌍 `man` — reading the manual — is exactly the right instinct.",
+            "here: `help` lists what works · `learn` opens the study note · `hint` nudges"),
+}
 
 
 def teach_unknown(world, io, prog):
     """Unknown here → the engine's own real-world atlas, so the teaching voice
     stays identical to every other mission."""
     world.flags["_noop"] = True
+    if prog in LINUX_LESSONS:
+        head, follow = LINUX_LESSONS[prog]
+        io.print(head)
+        io.print(c("   " + follow, "dim"))
+        return
     if in_real_world(prog):
         head, follow = real_world_entry(prog)
         io.print(head.format(cmd=prog))
