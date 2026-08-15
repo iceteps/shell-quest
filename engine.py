@@ -1812,10 +1812,14 @@ def run_mission(mission, profile, io=None):
             io.print(c("🧭 meta:  task (objectives) · hint (nudge, -5 XP) · demo (watch it solved) · "
                        "learn (vault note) · setup (install the real tools) · os (your OS) · "
                        "quit (back to map)", "cyan"))
-            io.print(c("   tools: docker · git · kubectl · minikube — plus whatever the mission brings "
-                       "(helm/terraform/ansible/…)", "dim"))
-            io.print(c("   shell: ls · cat · touch · mkdir · rm · echo · edit <file> · pwd · whoami · "
-                       "clear · history", "dim"))
+            # A mission whose world isn't the default one describes its own toolbox.
+            for line in mission.get("help_lines") or [
+                "   tools: docker · git · kubectl · minikube — plus whatever the mission brings "
+                "(helm/terraform/ansible/…)",
+                "   shell: ls · cat · touch · mkdir · rm · echo · edit <file> · pwd · whoami · "
+                "clear · history",
+            ]:
+                io.print(c(line, "dim"))
             io.print(c("   type real commands — the world reacts like the real tools would", "dim"))
             continue
         if stripped == "hint":

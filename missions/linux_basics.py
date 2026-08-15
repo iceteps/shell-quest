@@ -144,6 +144,41 @@ _PING = ("PING google.com (142.250.185.78) 56(84) bytes of data.\n"
          "4 packets transmitted, 4 received, 0% packet loss, time 3005ms")
 
 
+# The DevOps tools are installed on this host (so `which docker` telling you so isn't a
+# lie) — they're just taught in other missions. Version checks must still answer like the
+# real thing: `setup` sends players here to run exactly these, and the engine's own
+# prerequisite-realism rule says a check-first command always gets a real reply.
+_TOOL_VERSIONS = {
+    "docker": "Docker version 26.1.4, build 5650f9b",
+    "podman": "podman version 5.1.1",
+    "git": "git version 2.45.2",
+    "kubectl": 'Client Version: v1.30.2\nKustomize Version: v5.0.4',
+    "minikube": "minikube version: v1.33.1",
+    "helm": 'version.BuildInfo{Version:"v3.15.2", GitTreeState:"clean", GoVersion:"go1.22.4"}',
+    "terraform": "Terraform v1.9.0\non linux_amd64",
+    "ansible": "ansible [core 2.17.1]",
+    "python3": "Python 3.12.4",
+}
+_TOOL_HOME = {
+    "docker": "the 🐳 Docker missions", "podman": "the 🐳 Docker missions",
+    "git": "the 🌿 Git missions",
+    "kubectl": "the ☸️ Kubernetes missions", "minikube": "the ☸️ Kubernetes missions",
+    "helm": "the ⎈ Helm missions", "terraform": "the 🏗️ Terraform missions",
+    "ansible": "the 📜 Ansible missions", "python3": "the 📨 RabbitMQ mission",
+}
+
+# What this mission's shell actually understands — the generic engine `help` lists
+# docker/git/kubectl, which is wrong here.
+HELP_LINES = [
+    "   files: ls (-l -a) · cd · pwd · mkdir (-p) · touch · cat · cp · mv · rm (-r) · edit <file>",
+    "   text:  echo (-e, > and >>) · grep · find -name · head · tail · wc -l · | pipes",
+    "   perms: chmod (600 / 755 / +x) · ls -l to read the triads",
+    "   procs: sleep N & · ps (aux) · kill <PID>",
+    "   system: df (-h) · du (-sh) · ip a · ping -c N · uname · whoami · history · which",
+    "   archives & jobs: tar (-cvf/-tvf) · gzip · crontab (-l, | crontab -) · ./script.sh",
+]
+
+
 def _split_redirect(argv):
     """Pull a trailing > file / >> file off an argv list."""
     for i, a in enumerate(argv):
@@ -153,17 +188,28 @@ def _split_redirect(argv):
 
 
 def _emit(world, io, text, target, append):
+    """Redirect to a file, or hand the text back to be printed once by the caller.
+
+    It must NOT print here: _shell prints whatever _cmd returns, so printing as well
+    would double every un-redirected line.
+    """
     if target is None:
-        if text:
-            io.print(text)
-        return
-    err = _write(world, _abspath(world, target), text, append)
-    if err:
-        io.print(err)
+        return text
+    return _write(world, _abspath(world, target), text, append)   # None, or an error string
 
 
 def _unescape(s):
     return s.replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _expand(world, s):
+    """The handful of variables a first-hour shell actually uses. Deliberately NOT
+    doing $(command) — that the crontab lesson stays honest about."""
+    f = _st(world)
+    for var, val in (("$HOME", HOME), ("${HOME}", HOME), ("$PWD", f["cwd"]),
+                     ("${PWD}", f["cwd"]), ("$USER", "root"), ("${USER}", "root")):
+        s = s.replace(var, val)
+    return s
 
 
 def _cmd(world, io, argv, piped_in=None):
@@ -233,8 +279,7 @@ def _cmd(world, io, argv, piped_in=None):
         text = " ".join(body)
         if interpret:
             text = _unescape(text)
-        _emit(world, io, text, redir, append)
-        return None if redir else text
+        return _emit(world, io, text, redir, append)
 
     if prog == "cat":
         outs = []
@@ -321,9 +366,7 @@ def _cmd(world, io, argv, piped_in=None):
                     hits.append(p)
         if pattern and any(h.endswith(".txt") for h in hits):
             world.flags["found_txt"] = True
-        out = "\n".join(hits)
-        _emit(world, io, out, redir, append)
-        return None if redir else out
+        return _emit(world, io, "\n".join(hits), redir, append)
 
     if prog == "grep":
         names = [a for a in args if not a.startswith("-")]
@@ -340,9 +383,7 @@ def _cmd(world, io, argv, piped_in=None):
         else:
             return "usage: grep PATTERN FILE"
         matched = [ln for ln in body.split("\n") if pattern.lower() in ln.lower()]
-        out = "\n".join(matched)
-        _emit(world, io, out, redir, append)
-        return None if redir else out
+        return _emit(world, io, "\n".join(matched), redir, append)
 
     if prog == "wc":
         body = piped_in if piped_in is not None else _read_arg(world, args)
@@ -402,8 +443,7 @@ def _cmd(world, io, argv, piped_in=None):
         return None
 
     if prog == "df":
-        _emit(world, io, _DF, redir, append)
-        return None if redir else _DF
+        return _emit(world, io, _DF, redir, append)
 
     if prog == "du":
         target = next((a for a in args if not a.startswith("-")), f["cwd"])
@@ -411,16 +451,14 @@ def _cmd(world, io, argv, piped_in=None):
         total = sum(len(v) for k, v in world.files.items() if k.startswith(p)) // 1024 + 16
         out = f"{total}K\t{target}" if any("s" in a for a in args if a.startswith("-")) \
             else f"{total}K\t{target}"
-        _emit(world, io, out, redir, append)
-        return None if redir else out
+        return _emit(world, io, out, redir, append)
 
     if prog == "ip":
         ok = bool(args) and args[0] in ("a", "addr", "address")
         if ok:
             world.flags["saw_ip"] = True
         out = _IP_A if ok else "Usage: ip [ OPTIONS ] OBJECT { COMMAND | help }"
-        _emit(world, io, out, redir, append)
-        return None if redir else out
+        return _emit(world, io, out, redir, append)
 
     if prog == "ifconfig":
         io.print(c("bash: ifconfig: command not found", "yellow"))
@@ -430,8 +468,7 @@ def _cmd(world, io, argv, piped_in=None):
         return None
 
     if prog == "ping":
-        _emit(world, io, _PING, redir, append)
-        return None if redir else _PING
+        return _emit(world, io, _PING, redir, append)
 
     if prog == "crontab":
         if "-l" in args:
@@ -506,6 +543,19 @@ def _cmd(world, io, argv, piped_in=None):
     if prog == "clear":
         return "\033[2J\033[H"
 
+    if prog in _TOOL_VERSIONS:
+        world.flags["_noop"] = True          # pure inspection / teach-only, never a "move"
+        asked_version = any(a in ("--version", "-v", "version", "-version") for a in args)
+        if asked_version:
+            io.print(_TOOL_VERSIONS[prog])
+            io.print(c("(it answered → it's installed. This is the check to run BEFORE any "
+                       "install step — `setup` shows the install itself)", "dim"))
+            return None
+        io.print(f"🌍 `{prog}` IS on this host — but this is a 🐧 Linux mission. "
+                 f"It's taught in {_TOOL_HOME[prog]}.")
+        io.print(c("   `task` shows what THIS mission needs · `quit` returns to the map", "dim"))
+        return None
+
     if prog == "which":
         t = args[0] if args else ""
         known = {"bash", "ls", "cat", "grep", "find", "tar", "gzip", "ping", "ps", "kill",
@@ -555,7 +605,7 @@ def _run_script(world, io, path, explicit=False):
 
 def _shell(world, m, io):
     """Catch-all handler: the Linux missions' own little shell."""
-    line = m.group(0).strip()
+    line = _expand(world, m.group(0).strip())
     _st(world)
     background = line.endswith("&")
     if background:
@@ -617,7 +667,9 @@ def _teach_unknown(world, io, prog):
     io.print(c("   this mission is a Linux shell — `help` lists what it understands", "dim"))
 
 
-_HANDLERS = [(r".+", _shell)]
+# Catch-all, but `quit`/`exit` must fall THROUGH to the engine — handlers dispatch
+# first, so swallowing them would trap the player in the mission with no way out.
+_HANDLERS = [(r"(?!(?:quit|exit)\s*$).+", _shell)]
 
 
 # ---------------------------------------------------------------- missions --
@@ -634,6 +686,7 @@ MISSIONS = [
                   "🌍 You're on a real Linux box now — `setup` shows how the tools install there."),
         "world": {},
         "handlers": _HANDLERS,
+        "help_lines": HELP_LINES,
         "objectives": [
             {"desc": "Create ~/linux_course with week1 and week2 inside it", "xp": 10,
              "hint": "mkdir makes directories; -p creates a whole path at once and never complains.",
@@ -705,6 +758,7 @@ MISSIONS = [
             "files": {},
         },
         "handlers": _HANDLERS,
+        "help_lines": HELP_LINES,
         "objectives": [
             {"desc": "Create week2/log.txt with the three lines from the assignment", "xp": 10,
              "hint": 'echo -e lets \\n mean "new line": echo -e "a\\nb\\nc" > file',
@@ -772,6 +826,7 @@ MISSIONS = [
                   "(Assignments 7–10 of the REAL graded sheet.)"),
         "world": {},
         "handlers": _HANDLERS,
+        "help_lines": HELP_LINES,
         "objectives": [
             {"desc": "Check the machine's IP addresses", "xp": 10,
              "hint": "The modern command is two letters and a subcommand. `ifconfig` is the retired one.",
