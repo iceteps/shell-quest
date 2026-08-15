@@ -5,7 +5,7 @@
 **Learn DevOps by typing the real commands.** A terminal game: you get missions
 ("the app is down — fix it"), a simulated world (containers, images, networks,
 git branches, a Kubernetes cluster, cloud resources), and you solve them with
-the actual `docker` / `git` / `kubectl` / `helm` / `ansible` / `terraform`
+the actual `ls`/`chmod`/`grep` and `docker` / `git` / `kubectl` / `helm` / `ansible` / `terraform`
 commands — against an engine that responds like the real tools do.
 
 No dependencies. Pure Python 3.8+ standard library. Windows/macOS/Linux.
@@ -43,6 +43,8 @@ Pick a mission from the map. In-mission meta-commands:
 | `hint` | a nudge for the next objective (costs 5 XP) |
 | `demo` | 🎬 **watch the mission solved step-by-step** — Enter advances, `takeover` hands you the keyboard mid-run. Watching pays no XP; doing does. Already made moves? `demo!` resets the world and plays from the top. |
 | `learn` | which study note this mission pairs with |
+| `setup` | 🧰 how to install the real tools **on your own machine** |
+| `os` | show or change which OS the real-world tips target (`os linux`) |
 | `help` | everything the simulated world understands (tools + shell basics) |
 | `quit` | leave the mission (no partial save) |
 
@@ -54,9 +56,25 @@ Rookie → Tinkerer → Operator → Engineer → Senior → DevOps Legend.
 you the *transferable concept* you just used — and finishing a mission prints a
 "what you just practiced" recap. Typos get a gentle *did-you-mean* nudge.
 
-**Wrong commands teach too.** Type `winget`, `apt`, `wsl`, `sudo`, `vim`, or an
-image name as if it were a command, and the game recognizes the real-world tool
-and explains 🌍 how it maps to this world — no cold "command not found" walls.
+**The game knows which machine you're on.** First run asks: Linux, macOS or
+Windows (it guesses from your platform). That one choice retunes every
+real-world tip — `dnf` vs `brew` vs `winget`, whether `sudo` is even a thing,
+`which` vs `where`, WSL, `podman` on a Fedora box. The simulated world is always
+Linux; only the advice about *your* machine changes.
+
+```bash
+python quest.py --os linux      # or mac / windows
+python quest.py --setup         # the real install steps for that OS
+```
+
+`--setup` prints the actual commands — Docker Engine, kubectl, minikube, Helm —
+for your distro, including the two lines everyone forgets on Linux:
+`systemctl enable --now docker` and `usermod -aG docker $USER`.
+
+**Wrong commands teach too.** Type `winget`, `apt`, `dnf`, `podman`, `systemctl`,
+`wsl`, `sudo`, `vim`, or an image name as if it were a command, and the game
+recognizes the real-world tool and explains 🌍 how it maps to this world — in the
+dialect of the OS you picked. No cold "command not found" walls.
 The host shell also does the basics for real: `ls`, `cat`, `pwd`, `whoami`,
 `mkdir`, `clear`, `history`, and a tiny `edit <file>` editor.
 
@@ -82,26 +100,40 @@ python quest.py --link-vault "<your-vault>/Shell Quest Progress.md"
 
 | # | mission | trains |
 |---|---|---|
-| 🐳 1 | Hello, Container | pull, run -dit, exec, container lifecycle |
-| 🐳 2 | The Vanishing Container | debugging: ps -a, logs, root-cause, rebuild |
-| 🐳 3 | Talk to Each Other | user-defined networks, name resolution |
-| 🐳 4 | Ship It ⚓ | **the real Assignment 1**: Dockerfile → build → tag → login → push |
-| 🌿 5 | The First Commit | status, add, commit, push -u |
-| 🌿 6 | Branch Out | branches, switching, pushing a feature branch |
-| 🌿 7 | The Conflict 💥 | **the real Git assignment finale**: merge conflict + resolution |
-| ☸️ 8 | First Contact | **the real K8s CLI assignment**: minikube, apply -f ., services, browser |
-| ☸️ 9 | Break It, Watch It Heal 🩹 | namespaces (-n!), self-healing, scale, set image |
-| ☸️ 10 | Locked Down 🛡️ | **the real RBAC homework**: SA + Role + RoleBinding, auth can-i yes→no |
-| ⎈ 11 | Package It | helm template/install/upgrade --set/rollback/history |
-| 🔁 12 | The Robot Deploys 🤖 | GitOps loop: push → CI bumps tag → ArgoCD syncs |
-| 📜 13 | Agentless Army | inventory, playbook, **idempotency**, handlers |
-| 🏗️ 14 | Declare the Cloud | terraform init → plan → apply → grow → destroy |
-| 📨 15 | Post Office | compose, producer/queue/consumer, decoupling |
-| 🛰️ 16 | **THE CAMPAIGN** | the whole course in one run: terraform → ansible → kubectl → helm → argocd → weather through the queue → destroy |
+| 🐧 1 | First Contact 🐧 | **the real Linux assignment 1–3**: the filesystem tree, `chmod`, `ls -l`, `find` |
+| 🐧 2 | Read the Logs 🔎 | **assignments 4–6**: grep + redirection, background jobs, `ps`/`kill`, `df`/`du` |
+| 🐧 3 | Ship the Script 📜 | **assignments 7–10**: `ip a`, `ping -c`, a shebang script, cron, tar/gzip |
+| 🐳 4 | Hello, Container | pull, run -dit, exec, container lifecycle |
+| 🐳 5 | The Vanishing Container | debugging: ps -a, logs, root-cause, rebuild |
+| 🐳 6 | Talk to Each Other | user-defined networks, name resolution |
+| 🐳 7 | Ship It ⚓ | **the real Assignment 1**: Dockerfile → build → tag → login → push |
+| 🌿 8 | The First Commit | status, add, commit, push -u |
+| 🌿 9 | Branch Out | branches, switching, pushing a feature branch |
+| 🌿 10 | The Conflict 💥 | **the real Git assignment finale**: merge conflict + resolution |
+| ☸️ 11 | First Contact | **the real K8s CLI assignment**: minikube, apply -f ., services, browser |
+| ☸️ 12 | Break It, Watch It Heal 🩹 | namespaces (-n!), self-healing, scale, set image |
+| ☸️ 13 | Locked Down 🛡️ | **the real RBAC homework**: SA + Role + RoleBinding, auth can-i yes→no |
+| ⎈ 14 | Package It | helm template/install/upgrade --set/rollback/history |
+| 🔁 15 | The Robot Deploys 🤖 | GitOps loop: push → CI bumps tag → ArgoCD syncs |
+| 📜 16 | Agentless Army | inventory, playbook, **idempotency**, handlers |
+| 🏗️ 17 | Declare the Cloud | terraform init → plan → apply → grow → destroy |
+| 📨 18 | Post Office | compose, producer/queue/consumer, decoupling |
+| 🛰️ 19 | **THE CAMPAIGN** | the whole course in one run: terraform → ansible → kubectl → helm → argocd → weather through the queue → destroy |
 
-Missions 4, 7, 8, and 10 mirror the course's actual graded assignments — beat
-them here first, then do the real thing with confidence. Mission 16 is the
+Missions 1–3, 7, 10, 11 and 13 mirror the course's actual graded assignments —
+beat them here first, then do the real thing with confidence. Mission 19 is the
 capstone dress rehearsal: don't touch it until the others fall.
+
+### 🔁 Behind on classes?
+
+```bash
+python quest.py --catchup
+```
+
+Prints the ordered route back to current — for each topic, the study note to
+read, the missions to play, and which REAL graded assignment that stretch
+prepares you for, with your progress marked against it. Inside the game, type
+`catchup` at the mission map for the same thing.
 
 ## Your progress
 
@@ -118,13 +150,13 @@ python quest.py --selftest
 
 ## Also in this repo: ⚡ the quick quiz
 
-`quiz/quiz.py` — a zero-setup rapid-fire quiz across **all** course topics (K8s, Helm,
+`quiz/quiz.py` — a zero-setup rapid-fire quiz across **all** course topics (Linux, K8s, Helm,
 Ansible, Terraform, RabbitMQ, GitOps too — broader than the missions). Perfect for a
 5-minute warm-up when a full mission is too much:
 
 ```bash
 python quiz/quiz.py                 # 12 random questions
-python quiz/quiz.py --topic git     # drill one topic
+python quiz/quiz.py --topic linux   # drill one topic
 ```
 
 Same repo on purpose (monorepo!): one clone gets you both games, and adding a course

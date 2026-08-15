@@ -2,14 +2,18 @@
 """Shell Quest — learn DevOps by typing the real commands.
 
     python quest.py                      play (mission map)
+    python quest.py --catchup            missed classes? the ordered route back to current
+    python quest.py --os <name>          aim real-world tips at linux / mac / windows
+    python quest.py --setup              how to install the real tools on your machine
     python quest.py --selftest           lint + prove every mission is completable (CI)
     python quest.py --link-vault <file>  write live progress into an Obsidian note
     python quest.py --sync-vault         re-render the vault progress note now
 """
 import sys
 
-from engine import (IO, c, level, load_config, load_profile, run_mission,
-                    save_config, save_profile, sync_vault_note)
+from engine import (IO, OS_NAMES, c, detect_os, level, load_config, load_profile,
+                    os_label, print_setup, run_mission, save_config, save_profile,
+                    set_player_os, sync_vault_note)
 from missions import ALL_MISSIONS, TOPICS
 
 
@@ -22,6 +26,29 @@ def banner(profile):
     if profile["name"]:
         print(c(f"  {profile['name']} · Level {lvl} {name} · {profile['xp']} XP "
                 f"· {len(profile['completed'])}/{len(ALL_MISSIONS)} missions", "bold"))
+        print(c(f"  🖥️  real-machine tips: {os_label()}   ({'os <linux|mac|windows>' } in a mission "
+                f"· `setup` = install the real tools)", "dim"))
+
+
+def ask_os(profile):
+    """Ask once which machine the player is actually on. The simulated host is
+    always Linux; this only aims the 🌍 real-world advice at the right OS."""
+    guess = detect_os()
+    print(c("\n🖥️  Which machine are you on for real?", "cyan"))
+    print(c("   The world in here is always Linux — this only decides the install/sudo/"
+            "which-vs-where advice you get.", "dim"))
+    for i, (key, label) in enumerate(OS_NAMES.items(), 1):
+        star = c("  ← detected", "dim") if key == guess else ""
+        print(f"   {i}. {label}{star}")
+    try:
+        raw = input(c(f"> [{guess}] ", "cyan")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        raw = ""
+    by_num = dict(enumerate(OS_NAMES, 1))
+    choice = by_num.get(int(raw)) if raw.isdigit() else (raw if raw in OS_NAMES else None)
+    profile["os"] = choice or guess
+    set_player_os(profile["os"])
+    print(c(f"   → tips tuned for {os_label()}. Change any time with `os <name>`.", "green"))
 
 
 def mission_map(profile):
@@ -37,20 +64,83 @@ def mission_map(profile):
             mark = c("✅", "green") if done else c("🔓", "yellow")
             best = f" · best {profile['completed'][m['id']]['xp']} XP" if done else ""
             print(f"   {mark} {n}. {m['title']}{c(best, 'dim')}")
-    print(c("\n  pick a mission number · 'q' to quit", "dim"))
+    print(c("\n  pick a mission number · 'catchup' for a route · 'q' to quit", "dim"))
     return index
+
+
+# Missed a few classes? This is the order that actually builds on itself, and
+# which of the course's REAL graded assignments each stretch prepares you for.
+CATCHUP_ROUTE = [
+    ("linux", "Linux Fundamentals", "the 10-part Linux assignment (+3 extras)"),
+    ("docker", "Class 01/02 - Docker", "Docker Basics – Assignment 1"),
+    ("git", "Class 03 - Git", "Git Fundamentals: branching, merging & conflicts"),
+    ("k8s", "Class 05 - Kubernetes", "K8s CLI assignment · Core Resources & RBAC · Day-2 Ops"),
+    ("helm", "Class 06 - Helm", "Helm From Scratch · the advanced 'orbit' chart"),
+    ("gitops", "Class 08 - GitOps and CI-CD", None),
+    ("ansible", "Class 11 - Ansible", None),
+    ("terraform", "Class 12 - Terraform", None),
+    ("rabbitmq", "Class 13 - RabbitMQ Messaging", None),
+    ("capstone", "SkyWatch Capstone", None),
+]
+
+
+def catchup(profile):
+    """Show the shortest honest path back to current, from wherever you are."""
+    done = profile.get("completed", {})
+    print(c("\n🔁 CATCH-UP ROUTE", "bold"))
+    print(c("   Missed some classes? Take these in order — each one assumes the last.", "dim"))
+    print(c("   New topic? Run the mission once with `demo` to watch it, then beat it yourself.\n", "dim"))
+    numbers, n = {}, 0
+    seq = []
+    for topic, _note, _assignment in CATCHUP_ROUTE:
+        for m in ALL_MISSIONS:
+            if m["topic"] == topic:
+                n += 1
+                numbers[m["id"]] = n
+                seq.append(m)
+    next_up = None
+    for topic, note, assignment in CATCHUP_ROUTE:
+        ms = [m for m in ALL_MISSIONS if m["topic"] == topic]
+        if not ms:
+            continue
+        got = sum(1 for m in ms if m["id"] in done)
+        if got == len(ms):
+            state = c("✅ done", "green")
+        elif got:
+            state = c(f"◐ {got}/{len(ms)}", "yellow")
+        else:
+            state = c("○ not started", "dim")
+        print(f"  {TOPICS[topic]}  {state}")
+        print(c(f"      read: {note}", "dim"))
+        nums = ", ".join(str(numbers[m["id"]]) for m in ms)
+        print(c(f"      play: mission {nums}", "dim"))
+        if assignment:
+            print(c(f"      prove: {assignment}", "dim"))
+        if next_up is None and got < len(ms):
+            next_up = next(m for m in ms if m["id"] not in done)
+    if next_up:
+        print(c(f"\n  ⏭️  start here: {numbers[next_up['id']]}. {next_up['title']}", "magenta"))
+        print(c(f"      pairs with the note: {next_up.get('vault_note', '—')}", "dim"))
+    else:
+        print(c("\n  🌟 the whole route is clear — you're current.", "magenta"))
+    print("")
 
 
 def play():
     profile = load_profile()
+    set_player_os(profile.get("os") or detect_os())
     banner(profile)
     if not profile["name"]:
         try:
             profile["name"] = input(c("\nWhat's your handle, engineer? ", "cyan")).strip() or "anonymous"
         except (EOFError, KeyboardInterrupt):
             return
+        ask_os(profile)
         save_profile(profile)
         print(c(f"Welcome, {profile['name']}. Your progress saves to progress.json (gitignored — it's yours).", "dim"))
+    elif not profile.get("os"):
+        ask_os(profile)          # existing player from before the OS picker existed
+        save_profile(profile)
 
     while True:
         index = mission_map(profile)
@@ -62,11 +152,20 @@ def play():
             lvl, name = level(profile["xp"])
             print(c(f"\nSee you, {profile['name']} — Level {lvl} {name}, {profile['xp']} XP. 👋\n", "bold"))
             return
+        if choice in ("catchup", "catch-up", "route", "c"):
+            catchup(profile)
+            continue
+        if choice == "setup":
+            print_setup(IO())
+            continue
         m = index.get(choice)
         if not m:
             print(c("pick a number from the map (or q)", "yellow"))
             continue
+        os_before = profile.get("os")
         completed, xp, hints = run_mission(m, profile)
+        if profile.get("os") != os_before:
+            save_profile(profile)          # `os <name>` typed mid-mission — keep it
         if completed:
             prev = profile["completed"].get(m["id"], {}).get("xp", 0)
             if xp > prev:
@@ -162,13 +261,36 @@ def link_vault(path):
         print(c(f"Config saved, but writing to {path} failed — check the folder exists.", "yellow"))
 
 
+def set_os_cli(name):
+    if name not in OS_NAMES:
+        print(c(f"unknown OS '{name}' — pick one of: {' · '.join(OS_NAMES)}", "yellow"))
+        sys.exit(1)
+    profile = load_profile()
+    profile["os"] = name
+    set_player_os(name)
+    save_profile(profile)
+    print(c(f"Real-machine tips now target {os_label()}.", "green"))
+    print(c("Run `python quest.py --setup` to see the install steps for it.", "dim"))
+
+
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
+    elif "--os" in sys.argv:
+        i = sys.argv.index("--os")
+        if i + 1 >= len(sys.argv):
+            print(c(f"usage: python quest.py --os <{'|'.join(OS_NAMES)}>", "yellow"))
+            sys.exit(1)
+        set_os_cli(sys.argv[i + 1].strip().lower())
+    elif "--setup" in sys.argv:
+        set_player_os(load_profile().get("os") or detect_os())
+        print_setup(IO())
+    elif "--catchup" in sys.argv:
+        catchup(load_profile())
     elif "--link-vault" in sys.argv:
         i = sys.argv.index("--link-vault")
         if i + 1 >= len(sys.argv):
-            print(c('usage: python quest.py --link-vault "<path>\\Shell Quest Progress.md"', "yellow"))
+            print(c('usage: python quest.py --link-vault "<path>/Shell Quest Progress.md"', "yellow"))
             sys.exit(1)
         link_vault(sys.argv[i + 1])
     elif "--sync-vault" in sys.argv:

@@ -14,7 +14,8 @@ import shlex
 import sys
 
 # ---------------------------------------------------------------- terminal --
-os.system("")  # enable ANSI on Windows
+if os.name == "nt":
+    os.system("")  # enable ANSI on Windows consoles
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stdin.reconfigure(encoding="utf-8")
@@ -30,6 +31,81 @@ COLORS = {
 
 def c(text, color):
     return f"{COLORS[color]}{text}{COLORS['reset']}"
+
+
+# --------------------------------------------------------------- player OS --
+# The simulated host is always Linux-ish — that never changes. This is about the
+# REAL machine the player is sitting at. Install steps, whether `sudo` exists,
+# `which` vs `where`, whether WSL is a thing: all of it differs per OS, and
+# teaching the wrong one is worse than teaching nothing.
+OS_NAMES = {"linux": "Linux", "mac": "macOS", "windows": "Windows"}
+
+# Linux family -> (package manager, install verb) for the distro we're on.
+DISTRO_PKG = {
+    "fedora": ("dnf", "sudo dnf install"),
+    "debian": ("apt", "sudo apt install"),
+    "arch": ("pacman", "sudo pacman -S"),
+    "suse": ("zypper", "sudo zypper install"),
+}
+
+
+def detect_os():
+    """Best guess at the player's real OS — the default before they choose."""
+    if sys.platform.startswith("win"):
+        return "windows"
+    if sys.platform == "darwin":
+        return "mac"
+    return "linux"
+
+
+def detect_distro():
+    """Fedora-family vs Debian-family etc. Decides which package manager we teach."""
+    try:
+        with open("/etc/os-release", encoding="utf-8") as f:
+            data = f.read().lower()
+    except OSError:
+        return None
+    for key, family in (("fedora", "fedora"), ("rhel", "fedora"), ("centos", "fedora"),
+                        ("rocky", "fedora"), ("alma", "fedora"),
+                        ("ubuntu", "debian"), ("debian", "debian"), ("mint", "debian"),
+                        ("arch", "arch"), ("manjaro", "arch"),
+                        ("suse", "suse"), ("opensuse", "suse")):
+        if key in data:
+            return family
+    return None
+
+
+PLAYER_OS = detect_os()
+PLAYER_DISTRO = detect_distro() if PLAYER_OS == "linux" else None
+
+
+def set_player_os(os_name, distro=None):
+    """Point the 🌍 teaching layer at the player's actual machine."""
+    global PLAYER_OS, PLAYER_DISTRO
+    if os_name in OS_NAMES:
+        PLAYER_OS = os_name
+    PLAYER_DISTRO = (distro or (detect_distro() if PLAYER_OS == "linux" else None))
+    return PLAYER_OS
+
+
+def os_label():
+    if PLAYER_OS == "linux" and PLAYER_DISTRO:
+        return f"Linux ({PLAYER_DISTRO}-family)"
+    return OS_NAMES[PLAYER_OS]
+
+
+def pkg_mgr():
+    """The package manager to name when teaching an install on THIS machine."""
+    if PLAYER_OS == "windows":
+        return "winget", "winget install"
+    if PLAYER_OS == "mac":
+        return "brew", "brew install"
+    return DISTRO_PKG.get(PLAYER_DISTRO, ("your package manager", "sudo <pkg-mgr> install"))
+
+
+def pick(per_os):
+    """Resolve an OS-keyed dict to this player's entry ('*' = fallback)."""
+    return per_os.get(PLAYER_OS, per_os.get("*"))
 
 
 def _suggest(word, options):
@@ -181,8 +257,9 @@ def do_docker(world, args, io):
         return
     if sub == "version" and not rest:
         world.flags["_noop"] = True
+        server = "Docker Engine - Community" if PLAYER_OS == "linux" else "Docker Desktop"
         io.print("Client:\n Version:      26.1.4\n API version:  1.45\n OS/Arch:      linux/amd64\n\n"
-                 "Server: Docker Desktop\n Engine:\n  Version:     26.1.4\n  OS/Arch:     linux/amd64")
+                 f"Server: {server}\n Engine:\n  Version:     26.1.4\n  OS/Arch:     linux/amd64")
         return
 
     if sub == "compose":
@@ -1292,12 +1369,19 @@ def do_host(world, prog, args, io):
         if target in on_path:
             io.print(f"/usr/bin/{target}")
             io.print(c("(on PATH = installed — the check to run BEFORE any install step)", "dim"))
+            if prog == "which":
+                io.print(c("(`command -v` is the portable form — the one to use inside scripts)", "dim"))
         else:
             io.print(f"{prog}: no {target} in (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin)")
-            if target in REAL_WORLD:
+            if in_real_world(target):
                 io.print(c(f"(not on this Linux-ish host — type `{target}` by itself to see how it maps here)", "dim"))
         if prog == "where":
-            io.print(c("(`where` is the Windows spelling — on Linux the habit is `which`)", "dim"))
+            if PLAYER_OS == "windows":
+                io.print(c("(`where` is right at home on your Windows box — but every server you'll "
+                           "ever ssh into speaks `which`, so build that habit here)", "dim"))
+            else:
+                io.print(c(f"(`where` is the Windows spelling — you're on {os_label()}, "
+                           "where the habit is `which`)", "dim"))
     elif prog == "mkdir" and args:
         target = args[-1]
         key = target.rstrip("/") + "/"
@@ -1350,19 +1434,47 @@ def do_host(world, prog, args, io):
 # ------------------------------------------------- real-world command atlas --
 # Commands players type because they're REAL — recognized and redirected with a
 # micro-lesson instead of a cold "command not found". (headline, dim follow-up)
-_PKG_MGR = ("🌍 `{cmd}` is real — a package manager. It installs APPS on your machine "
-            "(e.g. it could install Docker itself).",
-            "Here Docker is already installed — and an IMAGE isn't an app: Docker fetches "
-            "those itself → docker pull <image>")
+_PKG_HOME = {"winget": "windows", "choco": "windows", "scoop": "windows", "brew": "mac",
+             "apt": "linux", "apt-get": "linux", "yum": "linux", "dnf": "linux",
+             "flatpak": "linux", "snap": "linux"}
+
+
+def _PKG_MGR(prog="apt"):
+    mgr, _install = pkg_mgr()
+    yours = {"windows": "winget (or choco/scoop)", "mac": "brew"}.get(PLAYER_OS, mgr)
+    head = ("🌍 `{cmd}` is real — a package manager. It installs APPS on your machine "
+            "(e.g. it could install Docker itself).")
+    tail = ("An IMAGE isn't an app though: Docker fetches those itself → "
+            "docker pull <image>   (`setup` = the real install steps)")
+    if _PKG_HOME.get(prog) == PLAYER_OS:
+        return head, f"`{prog}` is the right one for your {os_label()} box. " + tail
+    return head, (f"`{prog}` belongs to another OS — on your {os_label()} box it's "
+                  f"`{yours}`. " + tail)
+
+
 _EDITOR = ("🌍 `{cmd}` is a real editor — this world ships a tiny one instead: edit <file>",
            "type the new content, finish with a single `.` on its own line")
 REAL_WORLD = {
     "winget": _PKG_MGR, "choco": _PKG_MGR, "scoop": _PKG_MGR,
     "apt": _PKG_MGR, "apt-get": _PKG_MGR, "yum": _PKG_MGR, "dnf": _PKG_MGR, "brew": _PKG_MGR,
-    "wsl": ("🌍 `wsl` opens a Linux shell on a real Windows box — good instinct!",
-            "this quest already dropped you INTO a Linux-ish host: docker & friends work right here"),
-    "sudo": ("🌍 no `sudo` needed — you're already root in this world.",
-             "on a real Linux box docker often DOES need sudo, or your user in the `docker` group"),
+    "wsl": lambda p: pick({
+        "windows": ("🌍 `wsl` opens a Linux shell on a real Windows box — good instinct!",
+                    "it's how Docker Desktop runs containers on Windows at all. Here you're already "
+                    "on a Linux-ish host, so docker & friends work right where you are"),
+        "*": (f"🌍 `wsl` is a WINDOWS thing — you're on {os_label()}, so there's nothing to bridge.",
+              "WSL exists to give Windows a Linux kernel; your machine already has one"),
+    }),
+    "sudo": lambda p: pick({
+        "windows": ("🌍 no `sudo` needed — you're already root in this world.",
+                    "Windows has no sudo: the equivalent is an Administrator PowerShell, and "
+                    "Docker Desktop doesn't need it once installed"),
+        "mac": ("🌍 no `sudo` needed — you're already root in this world.",
+                "on macOS Docker Desktop runs as your user — if you're typing `sudo docker`, "
+                "you probably don't need to"),
+        "*": ("🌍 no `sudo` needed — you're already root in this world.",
+              "on your real Linux box docker DOES need root — the fix is one-time: "
+              "`sudo usermod -aG docker $USER`, then log out and back in (`setup` explains)"),
+    }),
     "ssh": ("🌍 `ssh` connects to a REMOTE machine — this world is a single host.",
             "the Ansible missions are where 'many machines' happens (agentless, over ssh — simulated)"),
     "ps": ("🌍 plain `ps` lists Linux processes — in docker-land the 'processes' are containers:",
@@ -1373,13 +1485,37 @@ REAL_WORLD = {
              "docker ps shows them · docker logs <name> shows what one is saying"),
     "ifconfig": ("🌍 `ifconfig` shows real network interfaces — this world's networking is docker's:",
                  "docker network ls · docker network create <name>"),
-    "ipconfig": ("🌍 `ipconfig` is the Windows one — this world's networking is docker's:",
-                 "docker network ls · docker network create <name>"),
+    "ipconfig": lambda p: pick({
+        "windows": ("🌍 `ipconfig` is the Windows one — this world's networking is docker's:",
+                    "docker network ls · docker network create <name>"),
+        "*": (f"🌍 `ipconfig` is the WINDOWS spelling — on {os_label()} it's `ip a` (or `ifconfig`).",
+              "and in here, networking means docker's: docker network ls · docker network create <name>"),
+    }),
     "ip": ("🌍 `ip` manages real Linux networking — this world's networking is docker's:",
            "docker network ls · docker network create <name>"),
     "cd": ("🌍 this world is one folder — no `cd` needed.",
            "`ls` lists the host's files; a container's files are separate (docker exec … to go inside)"),
     "vi": _EDITOR, "vim": _EDITOR, "nano": _EDITOR, "code": _EDITOR, "notepad": _EDITOR,
+    "gedit": _EDITOR, "kate": _EDITOR, "emacs": _EDITOR,
+    "podman": lambda p: pick({
+        "linux": ("🌍 `podman` is Fedora's daemonless, rootless container engine — and it speaks docker.",
+                  "same subcommands (`podman run`, `podman ps`); the `podman-docker` package even installs a "
+                  "`docker` shim. This course grades `docker`, so type docker here — but knowing they're "
+                  "interchangeable is a real Fedora superpower"),
+        "*": ("🌍 `podman` is docker without a daemon — common on Fedora/RHEL boxes.",
+              "same subcommands as docker; in this world, type docker"),
+    }),
+    "systemctl": lambda p: pick({
+        "linux": ("🌍 `systemctl` controls real Linux services — the sim's daemon is always up.",
+                  "on your box the docker daemon is a service: sudo systemctl enable --now docker "
+                  "(podman needs no daemon at all).  `setup` has the full install"),
+        "*": ("🌍 `systemctl` is Linux's service manager — this world's daemon is always running.",
+              "on a real Linux host: sudo systemctl enable --now docker"),
+    }),
+    "flatpak": _PKG_MGR,
+    "get-command": ("🌍 `Get-Command` is PowerShell's 'where does this live?' — the Linux spelling is `which`.",
+                    "portable everywhere (scripts included): command -v <tool>"),
+    "snap": _PKG_MGR,
     "man": ("🌍 `man` — reading the manual — is exactly the right instinct.",
             "here: `help` lists what works · `learn` opens the vault note · `hint` nudges the next step"),
     "curl": ("🌍 `curl` talks HTTP to a URL — it works the moment a mission serves something.",
@@ -1398,6 +1534,105 @@ REAL_WORLD = {
 for _img in ("ubuntu", "nginx", "alpine", "redis", "busybox"):
     REAL_WORLD[_img] = (f"🌍 `{_img}` is an IMAGE — a packaged filesystem, not a command.",
                         f"images are used THROUGH docker: docker pull {_img} → docker run {_img}")
+
+
+def _fmt(text, prog):
+    """{cmd} substitution that survives entries containing literal braces."""
+    try:
+        return text.format(cmd=prog)
+    except (KeyError, IndexError, ValueError):
+        return text
+
+
+def in_real_world(prog):
+    """Case-insensitive so PowerShell spellings (Get-Command) land too."""
+    return prog in REAL_WORLD or prog.lower() in REAL_WORLD
+
+
+def real_world_entry(prog):
+    """REAL_WORLD values may be a (head, follow) tuple or a callable returning one
+    (callables let an entry read PLAYER_OS at the moment it's printed)."""
+    v = REAL_WORLD.get(prog) or REAL_WORLD[prog.lower()]
+    return v(prog.lower()) if callable(v) else v
+
+
+# ------------------------------------------------------ real-machine setup --
+# What `setup` prints: how to install the REAL tools on the player's own box.
+# The sim can't teach this — it's the one thing that genuinely differs per OS,
+# and it's the wall most students hit before they ever reach a mission.
+SETUP_STEPS = {
+    "fedora": [
+        ("Docker Engine", [
+            "sudo dnf -y install dnf-plugins-core",
+            "sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo",
+            "sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin",
+            "sudo systemctl enable --now docker",
+            "sudo usermod -aG docker $USER      # then LOG OUT and back in",
+        ], "Fedora ships podman, not docker. `podman` is drop-in for most commands, but this "
+           "course grades `docker` — install the real thing. The usermod line is what stops "
+           "you needing sudo on every command."),
+        ("kubectl", ["sudo dnf -y install kubernetes-client"], "or grab the upstream binary if you need a specific version"),
+        ("minikube", [
+            "curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-latest.x86_64.rpm",
+            "sudo rpm -Uvh minikube-latest.x86_64.rpm",
+        ], "minikube runs a one-node cluster on your laptop; it needs docker (or podman) working first"),
+        ("Helm", ["sudo dnf -y install helm"], "if your Fedora is older than the helm package, use the official install script"),
+    ],
+    "debian": [
+        ("Docker Engine", [
+            "sudo apt-get update && sudo apt-get -y install ca-certificates curl",
+            "sudo install -m 0755 -d /etc/apt/keyrings",
+            "sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc",
+            "sudo apt-get update && sudo apt-get -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin",
+            "sudo usermod -aG docker $USER      # then LOG OUT and back in",
+        ], "the distro's own docker.io package lags badly — use Docker's repo"),
+        ("kubectl", ["sudo apt-get -y install kubectl"], "needs the Kubernetes apt repo added first"),
+        ("minikube", [
+            "curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube_latest_amd64.deb",
+            "sudo dpkg -i minikube_latest_amd64.deb",
+        ], ""),
+        ("Helm", ["sudo apt-get -y install helm"], "or the official get-helm-3 script"),
+    ],
+    "mac": [
+        ("Docker Desktop", ["brew install --cask docker"], "then LAUNCH Docker.app once — the CLI only works while the daemon runs"),
+        ("kubectl", ["brew install kubectl"], "Docker Desktop bundles one too; `which kubectl` tells you which wins"),
+        ("minikube", ["brew install minikube"], ""),
+        ("Helm", ["brew install helm"], ""),
+    ],
+    "windows": [
+        ("WSL2 (do this first)", ["wsl --install"], "Docker Desktop runs its Linux containers inside WSL2 — without it nothing works"),
+        ("Docker Desktop", ["winget install Docker.DockerDesktop"], "launch it once and let it finish setting up before you open a terminal"),
+        ("kubectl", ["winget install Kubernetes.kubectl"], ""),
+        ("minikube", ["winget install Kubernetes.minikube"], ""),
+        ("Helm", ["winget install Helm.Helm"], ""),
+    ],
+}
+
+
+def setup_key():
+    if PLAYER_OS == "linux":
+        return PLAYER_DISTRO if PLAYER_DISTRO in ("fedora", "debian") else "debian"
+    return PLAYER_OS
+
+
+def print_setup(io):
+    """The `setup` meta-command: install the real tools on the player's machine."""
+    key = setup_key()
+    io.print("")
+    io.print(c(f"🧰 REAL-MACHINE SETUP — {os_label()}", "bold"))
+    io.print(c("   This world is simulated; these are the commands for YOUR box.", "dim"))
+    if PLAYER_OS == "linux" and PLAYER_DISTRO not in ("fedora", "debian"):
+        io.print(c(f"   (no exact recipe for {PLAYER_DISTRO or 'this distro'} — showing the "
+                   "Debian-family shape; swap in your package manager)", "yellow"))
+    io.print(c("\n   ALWAYS check before installing — a reinstall can trample a working setup:", "cyan"))
+    io.print(c("     docker --version · kubectl version --client · helm version · git --version", "dim"))
+    for tool, cmds, note in SETUP_STEPS[key]:
+        io.print(c(f"\n   {tool}", "bold"))
+        for cmd in cmds:
+            io.print(c(f"     $ {cmd}", "green"))
+        if note:
+            io.print(c(f"     {note}", "dim"))
+    io.print(c("\n   Change OS:  `os linux` · `os mac` · `os windows`   (or: python quest.py --os <name>)\n", "dim"))
 
 # Tools that ARE in the game, but live in other missions' handlers.
 MISSION_TOOLS = {
@@ -1437,6 +1672,12 @@ def dispatch(world, line, io, mission):
 
     if prog == "sudo" and rest:
         io.print(c("(no sudo needed here — you're already root; running it anyway)", "dim"))
+        if PLAYER_OS == "linux":
+            io.print(c("   on your real box: sudo usermod -aG docker $USER, re-login, and you can "
+                       "drop the sudo for good", "dim"))
+        else:
+            io.print(c("   on your real box Docker Desktop runs under your own user — there's no "
+                       "sudo in that story at all", "dim"))
         return dispatch(world, shlex.join(rest), io, mission)
 
     if prog == "docker":
@@ -1461,11 +1702,11 @@ def dispatch(world, line, io, mission):
         world.flags["_noop"] = True
         io.print(f"`{prog}` is the right tool for this mission — that exact form just isn't wired up.")
         io.print(c("   `hint` points at the next step · `task` re-shows the goal", "dim"))
-    elif prog in REAL_WORLD:
+    elif in_real_world(prog):
         world.flags["_noop"] = True
-        head, follow = REAL_WORLD[prog]
-        io.print(head.format(cmd=prog))
-        io.print(c("   " + follow, "dim"))
+        head, follow = real_world_entry(prog)
+        io.print(_fmt(head, prog))
+        io.print(c("   " + _fmt(follow, prog), "dim"))
     elif prog in MISSION_TOOLS:
         world.flags["_noop"] = True
         io.print(f"🌍 `{prog}` IS in the game — it lives in {MISSION_TOOLS[prog]}. This mission doesn't use it.")
@@ -1552,9 +1793,25 @@ def run_mission(mission, profile, io=None):
             show_task(); continue
         if stripped == "learn":
             io.print(c(f"📖 Open your vault note: {mission.get('vault_note', '—')}", "cyan")); continue
+        if stripped == "setup":
+            print_setup(io)
+            continue
+        if stripped == "os" or stripped.startswith("os "):
+            arg = stripped[3:].strip()
+            if not arg:
+                io.print(c(f"🖥️  teaching for: {os_label()}   (change: os linux · os mac · os windows)", "cyan"))
+            elif arg in OS_NAMES:
+                set_player_os(arg)
+                profile["os"] = arg
+                io.print(c(f"🖥️  real-machine tips now target {os_label()}.", "green"))
+                io.print(c("   `setup` shows how to install the real tools there.", "dim"))
+            else:
+                io.print(c(f"unknown OS '{arg}' — pick one of: linux · mac · windows", "yellow"))
+            continue
         if stripped == "help":
             io.print(c("🧭 meta:  task (objectives) · hint (nudge, -5 XP) · demo (watch it solved) · "
-                       "learn (vault note) · quit (back to map)", "cyan"))
+                       "learn (vault note) · setup (install the real tools) · os (your OS) · "
+                       "quit (back to map)", "cyan"))
             io.print(c("   tools: docker · git · kubectl · minikube — plus whatever the mission brings "
                        "(helm/terraform/ansible/…)", "dim"))
             io.print(c("   shell: ls · cat · touch · mkdir · rm · echo · edit <file> · pwd · whoami · "

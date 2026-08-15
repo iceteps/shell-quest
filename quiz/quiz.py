@@ -2,13 +2,13 @@
 """
 DevOps Experts — terminal quiz game.
 
-A fast, fun self-test across the whole course (Docker, Git, K8s, Helm,
+A fast, fun self-test across the whole course (Linux, Docker, Git, K8s, Helm,
 Ansible, Terraform, RabbitMQ, GitOps, foundations). Pure standard library.
 
 Run:
     python quiz.py                # 12 random questions from all topics
     python quiz.py --all          # every question
-    python quiz.py --topic git    # only one topic (docker/git/k8s/helm/
+    python quiz.py --topic linux  # only one topic (linux/docker/git/k8s/helm/
                                   # ansible/terraform/rabbitmq/gitops/foundations)
     python quiz.py -n 20          # choose how many questions
 """
@@ -18,7 +18,8 @@ import random
 import sys
 
 # --- make ANSI colours work on Windows 10+ terminals ---
-os.system("")
+if os.name == "nt":
+    os.system("")
 # --- force UTF-8 so emojis/box-drawing don't crash on Windows (cp1252) ---
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -39,6 +40,46 @@ def c(text, color):
 # Each question: topic, q, either "options"+"answer"(index) for multiple choice,
 # or "accept" (list of accepted substrings, lowercased) for free-text.
 QUESTIONS = [
+    # ---------------- Linux (class 1 — mirrors the real graded assignment) ----------------
+    {"topic": "linux", "q": "chmod 600 on a file means:",
+     "options": ["Everyone can read and write it", "Owner can read and write; group and others get nothing",
+                 "Owner can execute it", "It becomes read-only for everyone"], "answer": 1},
+    {"topic": "linux", "q": "In a permission triad, which numbers add up to rwx?",
+     "options": ["1+2+3", "4+2+1", "7+7+7", "3+3+1"], "answer": 1},
+    {"topic": "linux", "q": "What is the difference between > and >> ?",
+     "options": ["No difference", "> overwrites the file; >> appends to it",
+                 "> appends; >> overwrites", "> is for text, >> is for binary"], "answer": 1},
+    {"topic": "linux", "q": "Type the command that finds every .txt file under ~/linux_course:",
+     "accept": ["find ~/linux_course -name", "find /root/linux_course -name"]},
+    {"topic": "linux", "q": "Type the command that sends exactly 4 ping packets to google.com:",
+     "accept": ["ping -c 4 google.com", "ping -c4 google.com"]},
+    {"topic": "linux", "q": "You wrote hello.sh; running ./hello.sh says 'Permission denied'. Why?",
+     "options": ["The file is empty", "The execute bit isn't set — chmod +x hello.sh",
+                 "You need sudo", "Bash isn't installed"], "answer": 1},
+    {"topic": "linux", "q": "What does the #!/bin/bash line at the top of a script do?",
+     "options": ["Nothing — it's a comment", "Tells the kernel which interpreter to run the file with",
+                 "Imports bash functions", "Makes the file executable"], "answer": 1},
+    {"topic": "linux", "q": "Cron's five fields, in order, are:",
+     "options": ["hour minute day month weekday", "minute hour day-of-month month day-of-week",
+                 "second minute hour day month", "day month year hour minute"], "answer": 1},
+    {"topic": "linux", "q": 'You run: echo "* * * * * echo $(date) >> log" | crontab -   What breaks?',
+     "options": ["Nothing, it's correct",
+                 "$(date) expands ONCE as you write the crontab — the job logs one frozen timestamp forever",
+                 "cron cannot append to a file", "echo isn't allowed in cron"], "answer": 1},
+    {"topic": "linux", "q": "What is the difference between tar and gzip?",
+     "options": ["They're the same thing", "tar bundles many files into one; gzip compresses a single file",
+                 "tar compresses; gzip bundles", "gzip only works on directories"], "answer": 1},
+    {"topic": "linux", "q": "Type the command that lists a tar archive's contents WITHOUT extracting it:",
+     "accept": ["tar -tvf", "tar -tf", "tar tvf", "tar -ztvf"]},
+    {"topic": "linux", "q": "On a modern Fedora box `ifconfig` says command not found. What replaced it?",
+     "options": ["netstat", "ip a", "ipconfig", "ss -l"], "answer": 1},
+    {"topic": "linux", "q": "`ps aux | grep sleep` — what is the | actually doing?",
+     "options": ["Running both commands at once", "Feeding ps's output into grep as grep's input",
+                 "Comparing the two outputs", "Sending output to a file"], "answer": 1},
+    {"topic": "linux", "q": "kill <PID> vs kill -9 <PID>:",
+     "options": ["Identical", "kill asks politely (SIGTERM); -9 forces it (SIGKILL) with no cleanup",
+                 "-9 is the gentler one", "kill -9 only works as root"], "answer": 1},
+
     # ---------------- Docker ----------------
     {"topic": "docker", "q": "What's the difference between an image and a container?",
      "options": ["An image runs; a container is stored", "An image is a template; a container is a running instance of it",
@@ -211,6 +252,7 @@ QUESTIONS = [
 ]
 
 TOPIC_NAMES = {
+    "linux": "🐧 Linux",
     "docker": "🐳 Docker", "git": "🌿 Git", "k8s": "☸️ Kubernetes", "helm": "⎈ Helm",
     "ansible": "📜 Ansible", "terraform": "🏗️ Terraform", "rabbitmq": "📨 RabbitMQ",
     "gitops": "🔁 GitOps/CI-CD", "foundations": "🧭 Foundations",

@@ -31,6 +31,25 @@ Runs every mission's embedded `solution` script and fails if any mission can't b
 - **Demo mode** (`demo` in a fresh mission) replays the `solution` step-by-step: Enter advances, `takeover` hands control back mid-run. Objectives completed during demo pay 0 XP and an all-demo run is never recorded — watching teaches, doing scores. Because `solution` doubles as the demo script, keep solutions clean and pedagogically ordered (inspect → act → verify), not just minimal.
 - Error messages should mimic the real tools' output (e.g. `denied: requested access to the resource is denied`) — the authenticity is the pedagogy. A dim parenthetical teaching hint after a realistic error is the house style.
 - **Unknown commands teach, never scold.** `REAL_WORLD` in `engine.py` maps common real-world commands (winget/apt/wsl/sudo/vim/image-names-as-commands/…) to a 🌍 micro-lesson explaining how the real tool maps to the sim; `MISSION_TOOLS` redirects tools that live in other missions. Teach-only/unknown responses set `world.flags["_noop"]` so they don't count as "moves" (and so `demo` stays available); a state-mutating command must never set it. `demo!` resets the world mid-mission to allow watching after moves. When adding a fallback error branch, set `_noop` there too.
+- **The player's OS is a teaching layer, never a world change.** The simulated host is
+  *always* Linux (`pwd` → `/root/quest`, `uname` → Linux) — that never varies. What varies is
+  the 🌍 advice about the player's REAL machine: `PLAYER_OS` (+ `PLAYER_DISTRO`, sniffed from
+  `/etc/os-release`) is set from `profile["os"]` in `progress.json`, asked once at first run,
+  changeable with `os <name>` in a mission or `--os`. `REAL_WORLD` values may be a
+  `(head, follow)` tuple **or a callable returning one** — use a callable + `pick({...})` when
+  the lesson genuinely differs per OS (`wsl`, `sudo`, `ipconfig`, package managers, `podman`).
+  Resolve entries through `real_world_entry()`/`in_real_world()`, never by indexing the dict.
+  `print_setup()` / `SETUP_STEPS` hold the real install commands per OS — keep them accurate,
+  they are commands people paste. When adding real-world guidance anywhere, ask "is this true
+  on all three?" — if not, it belongs in a `pick({...})`.
+- **`missions/linux_basics.py` carries its own shell**, deliberately. The engine's host world
+  is one flat folder with no cwd, permissions or processes — right for docker/k8s, wrong for
+  Linux. Rather than reshape a world 16 missions depend on, that module registers a catch-all
+  `(r".+", _shell)` handler (handlers dispatch before generic dispatch) and implements cwd,
+  a directory set, mode bits, processes, pipes and redirection over `world.files` +
+  `world.flags`. Anything it doesn't know falls back to the shared `REAL_WORLD` atlas, so the
+  teach-don't-scold rule still holds. Extend that module for Linux behaviour; don't push it
+  into `engine.py` unless a non-Linux mission needs it too.
 - **Prerequisite realism — check-first works, already-exists refuses.** Version checks (`docker --version`/`version`, `git --version`, `which`/`where`) answer like real tools and are `_noop` (pure inspection). Existing state is never silently run over: repeat `docker pull` → *Image is up to date*, duplicate `docker network create` → daemon error, `kubectl create` on existing → *AlreadyExists* + apply-vs-create hint, duplicate `git branch`/`checkout -b` → *fatal: already exists*, `mkdir` on existing → *File exists* (`-p` stays quiet). When simulating a new command, model the real tool's already-exists behavior, not just its happy path.
 
 ## Adding a mission
@@ -47,6 +66,8 @@ Runs every mission's embedded `solution` script and fails if any mission can't b
 ## When the course advances
 
 When a new class/topic appears in the course (upstream: `yfreifeld/devops-course`), extend BOTH games in one commit: new mission(s) if the topic is hands-on simulatable, plus quiz questions for the topic. Companion study notes live at https://github.com/iceteps/devops-study-vault — each mission's `vault_note` field names its note; keep them consistent.
+
+Adding a topic also touches three things that silently go stale: `TOPICS`/`ALL_MISSIONS` order in `missions/__init__.py` (it drives both the map's numbering and "next up"), the `CATCHUP_ROUTE` table in `quest.py` (the ordered path for a student returning after missed classes — topic, note, and which REAL graded assignment it prepares for), and the README's mission table, which is numbered. Current state: **19 missions, 81 quiz questions**.
 
 ## Repo hygiene
 
