@@ -200,9 +200,10 @@ MISSIONS = [
             "script is just text — the line is not a comment, it's the loading instruction.",
             "A file needs the x bit to run. `chmod +x` is the second half of 'I wrote a script' — "
             "forget it and you get Permission denied on a file you own.",
-            "Cron's five fields are minute, hour, day-of-month, month, day-of-week. Watch the quoting: "
-            "in double quotes `$(date)` expands ONCE, when you write the crontab — the job then logs "
-            "the same frozen timestamp forever. Single-quote it so cron expands it each run.",
+            "Cron's five fields are minute, hour, day-of-month, month, day-of-week. The quoting matters "
+            "more than the schedule: try it once with \"$(date)\" in DOUBLE quotes, then run "
+            "`crontab -l` — you'll see a real timestamp baked in, because your shell expanded it "
+            "before cron ever saw the line. Single quotes hand the job to cron instead.",
             "tar bundles many files into one; gzip compresses one file. `.tar.gz` is literally both "
             "steps, which is why the extension has two parts.",
             "`tar -t` inspects an archive without unpacking. Always look before you extract — an "

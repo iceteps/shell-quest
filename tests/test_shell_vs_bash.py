@@ -107,6 +107,7 @@ def run_bash(cmds):
 
 # Cases whose output legitimately depends on the machine, not on behaviour.
 ENV_SPECIFIC = {
+    "subst in double quotes", "subst backticks", "subst nested",
     "uname", "uname -r", "uname -a", "whoami", "id", "df -h", "df raw",
     "date", "hostname", "cd no args", "var in double quotes",
     "echo double quotes var", "unmatched quote", "ls -la combined",
@@ -267,6 +268,12 @@ CASES = {
     "empty line": [""],
     "only spaces": ["   "],
 
+
+    # ---- command substitution (the cron single-vs-double quote lesson) ----
+    "subst in double quotes": ['echo "u=$(whoami)"'],
+    "subst in single quotes": ["echo 'u=$(whoami)'"],
+    "subst backticks": ["echo u=`whoami`"],
+    "subst nested": ['echo "$(basename $(pwd))"'],
     # ---- archives ------------------------------------------------------
     "tar create list": ["mkdir d", "touch d/f", "tar -cf d.tar d", "tar -tf d.tar"],
     "tar extract restores content": [

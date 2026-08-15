@@ -11,9 +11,14 @@ learns a wrong default here gets marked down for it later. Where we can't
 simulate something faithfully (a command that would block, a tool that isn't
 installed), we say so in the shell's own voice rather than faking success.
 
-Deliberate omissions, all of them teaching decisions rather than shortcuts:
-  * no `$(command)` substitution — the cron lesson turns on `$(date)` staying
-    literal until cron itself expands it;
+Command substitution `$(…)` is supported for the read-only informational commands
+(date, whoami, hostname, pwd, uname, id) and honours quoting: it expands inside
+double quotes, stays literal inside single quotes. That asymmetry IS the cron
+lesson — write the crontab with "$(date)" and the timestamp freezes at write time,
+which the student can then see in `crontab -l`.
+
+Deliberate omissions, teaching decisions rather than shortcuts:
+  * `$(…)` of state-changing commands is refused rather than half-simulated;
   * no `awk`/`sed` programs — out of scope for class 1, and a half-working awk
     teaches worse than an honest "not here";
   * `sleep` without `&` does not silently background (real bash blocks).
@@ -256,6 +261,29 @@ def tokenize(line):
     return words
 
 
+# Only side-effect-free commands may be substituted: enough for the lesson,
+# and nothing that could surprise a student by running twice.
+SUBSTITUTABLE = {"date", "whoami", "hostname", "pwd", "uname", "id", "basename"}
+
+
+def expand_subst(world, io, text):
+    """$(cmd) and `cmd` — expanded only where bash would expand them."""
+    def one(match):
+        inner = (match.group(1) or match.group(2) or "").strip()
+        if not inner:
+            return ""
+        argv = [w for w, _q, _s in (tokenize(inner) or [])]
+        if not argv or argv[0] not in SUBSTITUTABLE:
+            return match.group(0)          # leave anything else untouched
+        res = run_cmd(world, io, argv)
+        return res.out if isinstance(res, Res) else match.group(0)
+    prev = None
+    while prev != text:                     # nested $( $( ) ) resolves inside-out
+        prev = text
+        text = re.sub(r"\$\(([^()]*)\)|`([^`]*)`", one, text)
+    return text
+
+
 def expand_vars(world, s):
     f = st(world)
     for var, val in (("$HOME", HOME), ("${HOME}", HOME), ("$PWD", f["cwd"]),
@@ -314,7 +342,7 @@ def glob_word(world, word):
     return [(base + "/" + h) if keep_dir else h for h in sorted(hits)]
 
 
-def expand_argv(world, words):
+def expand_argv(world, words, io=None):
     """(word, quoted, single) triples -> flat argv, plus the redirection plan."""
     argv, redirs = [], []
     i = 0
@@ -330,7 +358,7 @@ def expand_argv(world, words):
         if single:
             argv.append(w)                       # single quotes: literal, full stop
         else:
-            v = expand_vars(world, w)
+            v = expand_vars(world, expand_subst(world, io, w))
             for b in ([v] if quoted else expand_braces(v)):
                 argv.extend([b] if quoted else glob_word(world, b))
         i += 1
@@ -1206,11 +1234,20 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
                 return fail("crontab: no input read from stdin")
             f["cron"] = [ln for ln in stdin.split("\n") if ln.strip()]
             io.print(c("crontab: installing new crontab", "dim"))
-            if any("$(" in ln or "`" in ln for ln in f["cron"]):
-                io.print(c("   ⚠ that line still contains $( … ) — if you wrote it inside DOUBLE "
-                           "quotes, your shell already expanded it and cron will log the same "
-                           "frozen value forever. Single-quote it so cron does the expanding.",
-                           "yellow"))
+            # If a timestamp is already baked into the line, the shell expanded it
+            # at write time — cron will log that one frozen value forever. This is
+            # the single-vs-double quote trap, caught the moment it happens.
+            frozen = re.compile(r"\b\w{3} \w{3} +\d+ \d\d:\d\d:\d\d\b")
+            for ln in f["cron"]:
+                if frozen.search(ln):
+                    io.print(c("   ⚠ look closely: a REAL timestamp is baked into that line.",
+                               "yellow"))
+                    io.print(c("     Your shell expanded $(date) when you pressed Enter, so cron "
+                               "will append that one frozen moment every minute, forever.", "dim"))
+                    io.print(c("     Single-quote it and cron does the expanding instead:",
+                               "dim"))
+                    io.print(c("       echo '* * * * * date >> ~/t.log' | crontab -", "green"))
+                    break
             return ok()
         return fail("crontab: usage error: file name must be specified for replace\n"
                     "usage: crontab [-u user] file\n       crontab [-u user] [ -e | -l | -r ]")
@@ -1380,7 +1417,7 @@ def _exec_pipeline(world, io, stages, background):
     """Run one pipeline (already split on |). Returns the exit code."""
     piped, code = None, 0
     for i, words in enumerate(stages):
-        argv, redirs, syn = expand_argv(world, words)
+        argv, redirs, syn = expand_argv(world, words, io)
         if syn:
             io.print(syn)
             return 2
