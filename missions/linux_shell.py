@@ -49,7 +49,8 @@ import json
 import re
 from datetime import datetime
 
-from engine import c, in_real_world, pick, real_world_entry
+from engine import (c, fit, fit_columns, grid, heading, in_real_world, menu_width,
+                    pad, pick, prompt_theme, real_world_entry)
 from missions import linux_help
 
 HOME = "/root"
@@ -628,14 +629,28 @@ def print_help_index(io):
     dead end the moment you need the third flag. Each name here has a real page
     behind it — `help ls`, `ls --help` and `man ls` all reach it.
     """
+    w = menu_width()
     io.print(c("🐧 This is a Linux shell. Everything below really runs here.", "bold"))
     io.print(c("   help <name>  ·  <name> --help  ·  man <name>   → the full page for one of them",
                "cyan"))
-    for title, names in linux_help.GROUPS:
-        io.print(c(f"\n  {title}", "bold"))
-        width = max(len(n) for n in names)
-        for n in names:
-            io.print(f"   {c(n.ljust(width), 'cyan')}  {c(linux_help.summary(n), 'dim')}")
+    # Fifty-odd commands one-per-line scrolls the answer off the top of the
+    # screen. Wide window → columns; narrow one → the plain list it always was.
+    names = [n for _t, group in linux_help.GROUPS for n in group]
+    name_w = max(len(n) for n in names)
+    # Size the column for the summaries most of them have, not for the longest
+    # one — three commands ending in `…` is a better index than every command
+    # in a single column. The full sentence is one `help <name>` away.
+    lengths = sorted(len(linux_help.summary(n)) for n in names)
+    natural = name_w + 2 + lengths[int(len(lengths) * 0.75)]
+    ncols, widths = fit_columns(natural, w, gutter=3, indent=3, max_cols=3)
+    for title, group in linux_help.GROUPS:
+        io.print("")
+        io.print(heading(c(f"  {title}", "bold"), cols=w))
+        cells = [pad(fit(f"{c(n.ljust(name_w), 'cyan')}  {c(linux_help.summary(n), 'dim')}",
+                         widths[i % ncols]), widths[i % ncols])
+                 for i, n in enumerate(group)]
+        for line in grid(cells, ncols, gutter=3, indent=3):
+            io.print(line)
     io.print(c("\n   the tools taught in other missions (docker · git · kubectl · helm · "
                "terraform · ansible) are installed here but not wired up", "dim"))
 
@@ -661,8 +676,28 @@ def prompt(world):
     simulated shell: every path you type is relative to a place you can't see,
     so `touch week1/notes.txt` fails from the wrong directory and looks like a
     bug in the game. Real bash tells you where you are; so does this.
+
+    `theme` swaps in the powerlevel10k-style prompts. The classic one stays the
+    default deliberately: it is the prompt waiting on the student's first real
+    server, and a game that never shows it hasn't prepared them for that.
     """
-    return c(f"[{USER}@{HOSTNAME} {pretty(world, st(world)['cwd'])}]# ", "cyan")
+    f = st(world)
+    here = pretty(world, f["cwd"])
+    if prompt_theme()[0] == "classic":
+        return c(f"[{USER}@{HOSTNAME} {here}]# ", "cyan")
+    from missions import prompt_theme as theme    # local: engine imports us first
+    code = f.get("last_code", 0)
+    jobs = len(f.get("procs", {}))
+    assist = world.flags.get("_assist_xp", 0)
+    return theme.render(
+        [("host", f"{USER}@{HOSTNAME}", "yellow"),
+         ("folder", here, "cyan"),
+         # p10k's habit, and the useful one: the segments that say nothing stay
+         # off the prompt entirely.
+         ("err", str(code) if code else "", "red"),
+         ("jobs", str(jobs) if jobs else "", "magenta")],
+        [("kbd", f"−{assist} XP" if assist else "", "magenta"),
+         ("clock", datetime.now().strftime("%H:%M"), "dim")])
 
 
 def complete(world, text):

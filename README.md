@@ -1,6 +1,8 @@
-# 🗡️ Shell Quest
+# 🗡️ DevOps Experts Quest
 
 ![selftest](https://github.com/iceteps/shell-quest/actions/workflows/selftest.yml/badge.svg)
+
+*(the repo is `shell-quest` — the game's title card calls it DevOps Experts Quest)*
 
 **Learn DevOps by typing the real commands.** A terminal game: you get missions
 ("the app is down — fix it"), a simulated world (containers, images, networks,
@@ -43,14 +45,52 @@ Pick a mission from the map. In-mission meta-commands:
 
 | command | what it does |
 |---|---|
-| `task` | re-show the objectives and your progress |
-| `hint` | a nudge for the next objective (costs 5 XP) |
-| `demo` | 🎬 **watch the mission solved step-by-step** — Enter advances, `takeover` hands you the keyboard mid-run. Watching pays no XP; doing does. Already made moves? `demo!` resets the world and plays from the top. |
-| `learn` | 📖 **the Codex** — opens this mission's note from your vault, right in the terminal. `learn cards` drills its flashcards, `learn quiz` runs its self-check, `learn drills` lists its side quests, `learn find <word>` searches every note |
-| `setup` | 🧰 how to install the real tools **on your own machine** |
-| `os` | show or change which OS the real-world tips target (`os linux`) |
-| `help` | the manual: every command this mission understands, grouped, with a real page behind each (`help ls`, `ls --help`, `man ls`) |
-| `quit` | leave the mission (no partial save) |
+| `/task` | re-show the objectives and your progress |
+| `/hint` | a nudge for the next objective (costs 5 XP) |
+| `/demo` | 🎬 **watch the mission solved step-by-step** — Enter advances, `takeover` hands you the keyboard mid-run. Watching pays no XP; doing does. Already made moves? `demo!` resets the world and plays from the top. |
+| `/learn` | 📖 **the Codex** — opens this mission's note from your vault, right in the terminal. `learn cards` drills its flashcards, `learn quiz` runs its self-check, `learn drills` lists its side quests, `learn find <word>` searches every note |
+| `/setup` | 🧰 how to install the real tools **on your own machine** |
+| `/os` | show or change which OS the real-world tips target (`os linux`) |
+| `/theme` | 🎨 the prompt's look: `classic` (real bash, the default) · `kali` (`┌──(root㉿quest-host)-[~]` / `└─$`) · `lean` · `rainbow`. Add a glyph set — `theme lean nerd` if you have a Nerd Font, `theme ascii` if your terminal has none. `theme emoji wide\|narrow` if right-hand columns look ragged; the menu prints a ruler that tells you which your terminal is |
+| `/complete` | ⌨ Tab-completion, **off by default**. `complete on` turns it on; it costs **1 XP each time it finishes a word for you** (never more than 10 a mission), and listing the candidates with a double-Tab is always free |
+| `/help` | the manual: every command this mission understands, grouped, with a real page behind each (`help ls`, `ls --help`, `man ls`) |
+| `/quit` | leave the mission (no partial save) |
+
+The leading slash is optional everywhere — `task` and `/task` are the same
+command — but it is what keeps game commands and the simulated world apart:
+`/tmp/deploy.sh` is still a path, and still runs.
+
+### 🗺️ The mission map
+
+One scrollable page: the banner at the top of it, every mission under it, and the
+window opens on the banner every time you start. Scroll and the banner slides
+away like anything else on a page — nothing is ever chopped into "page 2 of 3".
+Resize the window and it reflows immediately, the way `btop` does; too small to
+lay out at all (under 52×16) and it says so instead of drawing a broken screen.
+
+**Keys act on the keypress — no Enter.** Only keys that could never be part of an
+answer are bound, so `2` still means mission 2:
+
+| key | does |
+|---|---|
+| `↑` `↓` | scroll a few lines |
+| `PgUp` `PgDn` (or `←` `→`) | half a screen |
+| `Home` | back to the banner · `End` the bottom |
+| `Esc` | clear what you typed |
+
+| on the map | what it does |
+|---|---|
+| `<number>` | play that mission — the numbers never move, wherever you've scrolled to |
+| `/catchup` | the ordered route back to the class you're on; **type a number on the route to start that mission** |
+| `/learn` | 📖 the Codex, browsable: pick a note by number, by `class 3`, or by any word in its name |
+| `/theme` | a live menu — type `kali` and the sample prompt redraws under your pick |
+| `/complete` | `on` / `off`, toggled in place, with the XP price restated |
+| `/setup` | the real install steps; type `linux` / `mac` / `windows` to see another machine's |
+| `/help` | this list, in the game · `/quit` leaves |
+
+Every screen that lists options accepts one: `quit` steps back a level, and a
+bare Enter just gives you a fresh prompt, so a stray keystroke can never drop you
+out of what you were reading.
 
 Objectives check **state, not keystrokes** — any correct route wins. Finish a
 mission with **zero hints and no demo** for a +10 XP bonus, and **+5 more** if you
@@ -207,8 +247,8 @@ python quest.py --catchup
 
 Prints the ordered route back to current — for each topic, the study note to
 read, the missions to play, and which REAL graded assignment that stretch
-prepares you for, with your progress marked against it. Inside the game, type
-`catchup` at the mission map for the same thing.
+prepares you for, with your progress marked against it. Inside the game,
+`/catchup` shows the same route — and typing a number on it starts that mission.
 
 ## Your progress
 
@@ -220,9 +260,15 @@ lands in a commit. Delete the file to start fresh.
 Every mission ships with a solution script. This proves all of them are completable:
 
 ```bash
-python3 quest.py --selftest              # every mission is completable
-python3 tests/test_shell_vs_bash.py      # the Linux shell agrees with real bash
+python3 quest.py --selftest                  # every mission is completable
+python3 tests/test_shell_vs_bash.py          # the Linux shell agrees with real bash
+python3 tests/test_keys_and_commands.py      # the map screen, driven through a real pty
 ```
+
+The third one makes a terminal (`pty.fork`) and plays the game through it: keys
+that act without Enter, escape sequences that must not arrive as text, `/commands`,
+the Codex browser, reflow on resize, and no line ever wider than the window. It
+parks your `progress.json` and puts it back afterwards. All three run in CI.
 
 ## Also in this repo: ⚡ the quick quiz
 

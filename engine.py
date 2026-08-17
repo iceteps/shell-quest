@@ -9,11 +9,15 @@ import base64
 import difflib
 import fnmatch
 import json
+import math
 import os
 import random
 import re
 import shlex
+import shutil
 import sys
+import textwrap
+import unicodedata
 
 # ---------------------------------------------------------------- terminal --
 if os.name == "nt":
@@ -42,8 +46,607 @@ COLORS = {
 }
 
 
+# NO_COLOR is the cross-tool convention (no-color.org) and TERM=dumb is what a
+# CI log or an editor's terminal reports. Both mean: print words, not escapes.
+NO_COLOR = (os.environ.get("NO_COLOR") is not None
+            or os.environ.get("TERM") == "dumb")
+
+
 def c(text, color):
+    if NO_COLOR:
+        return str(text)
     return f"{COLORS[color]}{text}{COLORS['reset']}"
+
+
+# ------------------------------------------------------------------ layout --
+# The game's CHROME — map, banner, catch-up route, objective lists, the shell's
+# manual index — is drawn against the terminal it is actually running in, not
+# against a hardcoded 62 columns. A 200-column window shouldn't paint the map
+# into its first third, and a 70-column one shouldn't wrap every second line.
+#
+# Two rules keep this from leaking:
+#   1. Width is measured at DRAW time, never cached — resize the window between
+#      screens and the next screen is simply correct.
+#   2. This is for menus only. Simulated command output (`ls`, `kubectl get`,
+#      `terraform plan`) is formatted the way the REAL tool formats it — reflowing
+#      that to the window would make the sim lie, and tests/test_shell_vs_bash.py
+#      would rightly fail it.
+# 0 = use the whole window. QUEST_WIDTH caps it for anyone who'd rather not read
+# a map across an ultrawide monitor: QUEST_WIDTH=110 python quest.py
+try:
+    MENU_MAX = max(0, int(os.environ.get("QUEST_WIDTH", "0")))
+except ValueError:
+    MENU_MAX = 0
+_MARGIN = 1             # a frame drawn INTO the last column wraps on some terminals
+
+
+def _tty_size():
+    """Ask the TERMINAL, not the environment.
+
+    `shutil.get_terminal_size()` trusts $COLUMNS/$LINES above everything else,
+    and importing `readline` sets both — once — to whatever the window was at
+    import time. Resize after that and the variables name a window you no longer
+    have, so every redraw is laid out for the wrong width and the old lines look
+    like they're overlapping. The ioctl is always the truth.
+    """
+    for stream in (sys.__stdout__, sys.__stdin__, sys.__stderr__):
+        try:
+            size = os.get_terminal_size(stream.fileno())
+        except Exception:                  # noqa: BLE001 — not a tty, or no fileno
+            continue
+        if size.columns > 0 and size.lines > 0:
+            return size
+    return None
+
+
+def term_cols(default=80):
+    """The terminal's width right now. No tty (CI, a pipe) → $COLUMNS, then 80."""
+    size = _tty_size()
+    if size:
+        return size.columns
+    try:
+        cols = shutil.get_terminal_size((default, 24)).columns
+    except Exception:                      # noqa: BLE001 — never break on a weird tty
+        cols = default
+    return cols if cols > 0 else default
+
+
+def term_lines(default=24):
+    """The terminal's height right now — the other half of fitting a screen."""
+    size = _tty_size()
+    if size:
+        return size.lines
+    try:
+        rows = shutil.get_terminal_size((80, default)).lines
+    except Exception:                      # noqa: BLE001
+        rows = default
+    return rows if rows > 0 else default
+
+
+def menu_width():
+    """How wide a full-screen menu may paint itself."""
+    cols = term_cols() - _MARGIN
+    if MENU_MAX:
+        cols = min(cols, MENU_MAX)
+    return max(24, cols)
+
+
+# Below this the map stops being a map. btop draws a "terminal too small" panel
+# rather than a broken screen, and so do we — see `size_alert`.
+MIN_COLS, MIN_LINES = 52, 16
+
+
+def screen_too_small():
+    return term_cols() < MIN_COLS or term_lines() < MIN_LINES
+
+
+def clear_screen():
+    """Home the cursor and wipe the screen — only when a screen is watching.
+
+    Piped or redirected, this would just spray escapes into a file, and the
+    selftest would be full of them.
+    """
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write("\033[H\033[2J\033[3J")
+    sys.stdout.flush()
+
+
+def size_alert():
+    """btop's answer to a cramped window: say the numbers, keep the screen calm."""
+    clear_screen()
+    cols, lines = term_cols(), term_lines()
+    panel = box([" ", "⚠  TERMINAL TOO SMALL",
+                 f"size:   {cols} x {lines}",
+                 f"needed: {MIN_COLS} x {MIN_LINES}",
+                 " ", "resize the window, then press Enter", " "],
+                min(44, max(24, cols - 2)), "yellow")
+    print("\n" * max(0, (lines - len(panel)) // 2 - 1), end="")
+    for line in panel:
+        print(pad(line, cols, "center") if cols > disp_width(line) else line)
+
+
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+_VS16, _VS15, _ZWJ = "\ufe0f", "\ufe0e", "\u200d"   # emoji / text presentation, joiner
+
+# How wide is `\u2638\ufe0f` \u2014 a 1-column symbol with a variation selector asking for the
+# emoji picture? Terminals genuinely disagree: some give the glyph two cells,
+# many (GNOME Terminal / VTE among them) draw the colour picture inside ONE and
+# let it spill over its neighbour. Guess wrong and every right-aligned column on
+# a line containing one lands a cell off \u2014 which is exactly what a ragged map
+# looks like. Default to narrow (what VTE does), and let the player say
+# otherwise: `theme emoji wide` in the game, or QUEST_EMOJI=wide.
+EMOJI_WIDE = os.environ.get("QUEST_EMOJI", "").lower() == "wide"
+
+
+def set_emoji_width(mode):
+    """'wide' / 'narrow' \u2014 how to measure \u2638\ufe0f-style emoji. Returns the name set."""
+    global EMOJI_WIDE
+    if mode in ("wide", "narrow"):
+        EMOJI_WIDE = (mode == "wide")
+    return "wide" if EMOJI_WIDE else "narrow"
+
+
+def _cells(text):
+    """Yield (chunk, printed columns).
+
+    A colour escape is a chunk that costs nothing; an emoji plus its variation
+    selector is ONE chunk two columns wide. Anything that right-aligns has to
+    agree with the terminal about this or every column drifts.
+    """
+    i, n = 0, len(text)
+    while i < n:
+        m = _ANSI_RE.match(text, i)
+        if m:
+            yield m.group(0), 0
+            i = m.end()
+            continue
+        ch = text[i]
+        i += 1
+        if unicodedata.combining(ch):
+            yield ch, 0
+            continue
+        w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+        chunk = ch
+        while i < n:
+            nxt = text[i]
+            if nxt in (_VS16, _VS15) or unicodedata.combining(nxt):
+                # VS16 asks for the emoji picture of ☸ — whether that costs a
+                # second column is the terminal's call, not Unicode's.
+                if nxt == _VS16:
+                    w = 2 if EMOJI_WIDE else w
+                elif nxt == _VS15:
+                    w = 1
+                chunk += nxt
+                i += 1
+            elif nxt == _ZWJ and i + 1 < n:
+                chunk += text[i:i + 2]     # ZWJ join: 👨‍💻 is one glyph, not two
+                i += 2
+            else:
+                break
+        yield chunk, w
+
+
+def disp_width(text):
+    """Printed columns, not characters."""
+    return sum(w for _chunk, w in _cells(text))
+
+
+def pad(text, cols, align="left"):
+    gap = max(0, cols - disp_width(text))
+    if align == "right":
+        return " " * gap + text
+    if align == "center":
+        return " " * (gap // 2) + text + " " * (gap - gap // 2)
+    return text + " " * gap
+
+
+def fit(text, cols, ellipsis="…"):
+    """Cut to `cols` printed columns, keeping the colour codes (and the reset)."""
+    if cols <= 0:
+        return ""
+    if disp_width(text) <= cols:
+        return text
+    out, used, coloured = [], 0, False
+    for chunk, w in _cells(text):
+        if w == 0:
+            out.append(chunk)
+            coloured = coloured or chunk.startswith("\033")
+            continue
+        if used + w > cols - disp_width(ellipsis):
+            break
+        out.append(chunk)
+        used += w
+    return "".join(out) + ellipsis + (COLORS["reset"] if coloured else "")
+
+
+def spread(left, right="", cols=None, fill=" ", colour=None):
+    """`left` … `right`, stretched to exactly `cols` columns.
+
+    When the two don't fit, alignment is what gets dropped — never the words:
+    a narrow window gets `left right` and lets the terminal wrap it.
+    """
+    cols = cols or menu_width()
+    if not right:
+        return left
+    gap = cols - disp_width(left) - disp_width(right)
+    if gap < 2:
+        return f"{left} {right}"
+    run = (fill * gap)[:gap]
+    return left + (c(run, colour) if colour and fill.strip() else run) + right
+
+
+def leader(left, right="", cols=None, colour="dim"):
+    """A table-of-contents row: title ·············· value.
+
+    Squeezed, it gives up the dots, then the value — never the title, which is
+    the half that says WHICH row this is.
+    """
+    cols = cols or menu_width()
+    if not right:
+        return fit(left, cols)
+    room = cols - disp_width(right) - 1
+    if room >= disp_width(left) + 3:
+        # Dots every other column: on a 190-wide window a solid run of them is a
+        # grey bar, and the eye is supposed to follow the row, not read the fill.
+        return spread(left + " ", " " + right, cols, fill="· ", colour=colour)
+    if room >= disp_width(left) + 1:
+        return pad(left, room) + " " + right
+    return fit(left, cols)
+
+
+def heading(label, right="", cols=None, ch="─", colour="dim"):
+    """A section header whose rule fills the rest of the line."""
+    cols = cols or menu_width()
+    tail = (" " + right) if right else ""
+    gap = cols - disp_width(label) - 1 - disp_width(tail)
+    if gap < 2:
+        return f"{label} {right}".rstrip()
+    return label + " " + c((ch * gap)[:gap], colour) + tail
+
+
+def rule(cols=None, ch="─", colour="dim"):
+    return c(ch * (cols or menu_width()), colour)
+
+
+def fit_columns(cell, cols=None, gutter=3, indent=3, max_cols=4):
+    """How many columns of `cell` printed columns fit, and how wide each gets.
+
+    Returns (n, widths). The leftover columns that don't divide evenly are
+    handed out one each from the left, so `indent + sum(widths) + gutters` is
+    EXACTLY the width asked for — floor-divide them away instead and every grid
+    row stops one or two columns short of the rules above it, which is precisely
+    the kind of not-quite-straight edge the eye picks up.
+    """
+    room = (cols or menu_width()) - indent
+    n = max(1, min(max_cols, (room + gutter) // max(1, cell + gutter)))
+    inner = room - gutter * (n - 1)
+    base, spare = divmod(inner, n)
+    return n, [max(8, base + (1 if i < spare else 0)) for i in range(n)]
+
+
+def grid(cells, ncols, gutter=3, indent=3):
+    """Lay pre-padded cells out row-major (the numbers read left-to-right)."""
+    pad_ = " " * gutter
+    return [" " * indent + pad_.join(cells[i:i + ncols]).rstrip()
+            for i in range(0, len(cells), ncols)]
+
+
+def wrap_text(text, cols=None, indent="  "):
+    """Wrap a footer/legend line to the window instead of letting it fold."""
+    room = max(20, (cols or menu_width()) - disp_width(indent))
+    return textwrap.wrap(text, width=room, initial_indent=indent,
+                         subsequent_indent=indent) or [indent + text]
+
+
+def meter(done, total, cols):
+    """A progress bar for the space a wide window leaves over."""
+    cols = max(4, cols)
+    filled = 0 if not total else min(cols, round(cols * done / total))
+    return c("▓" * filled, "green") + c("░" * (cols - filled), "dim")
+
+
+def box(lines, cols=None, colour="blue", align="center"):
+    """A framed panel exactly `cols` wide, with each line padded to fit."""
+    cols = cols or menu_width()
+    inner = cols - 2
+    out = [c("╔" + "═" * inner + "╗", colour)]
+    for line in lines:
+        out.append(c("║", colour) + c(pad(fit(line, inner), inner, align), colour)
+                   + c("║", colour))
+    out.append(c("╚" + "═" * inner + "╝", colour))
+    return out
+
+
+# -------------------------------------------------------------- title card --
+# figlet + lolcat, in stdlib: this game must run after a bare `git clone`, so the
+# banner can't shell out to tools the player may not have (and `figlet`/`lolcat`
+# don't exist on Windows at all). A block font and lolcat's own sine-wave hue
+# formula are a few dozen lines each, and they work identically on all three OSes.
+TITLE = "DEVOPS EXPERTS QUEST"
+AUTHOR = "iCeTePs"
+CREDIT = f"crafted by {AUTHOR}"
+REPO = "github.com/iceteps/shell-quest"
+
+# 6 columns wide, 6 rows tall, two-cell strokes — the chunky one, used whenever
+# the window can hold it. Letters are drawn with full blocks so the drip below
+# (which is the same columns, thinning out) reads as the same object melting.
+BIG_FONT = {
+    " ": ("      ",) * 6,
+    "D": ("█████ ", "██  ██", "██  ██", "██  ██", "██  ██", "█████ "),
+    "E": ("██████", "██    ", "█████ ", "██    ", "██    ", "██████"),
+    "V": ("██  ██", "██  ██", "██  ██", "██  ██", " ████ ", "  ██  "),
+    "O": ("██████", "██  ██", "██  ██", "██  ██", "██  ██", "██████"),
+    "P": ("█████ ", "██  ██", "██  ██", "█████ ", "██    ", "██    "),
+    "S": ("██████", "██    ", "█████ ", "    ██", "    ██", "█████ "),
+    "X": ("██  ██", "██  ██", " ████ ", " ████ ", "██  ██", "██  ██"),
+    "R": ("█████ ", "██  ██", "██  ██", "█████ ", "██ ██ ", "██  ██"),
+    "T": ("██████", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  "),
+    "Q": ("██████", "██  ██", "██  ██", "██ ███", "██████", "    ██"),
+    "U": ("██  ██", "██  ██", "██  ██", "██  ██", "██  ██", "██████"),
+}
+
+# 4 columns wide, 5 rows tall, one blank column between letters.
+BLOCK_FONT = {
+    " ": ("    ", "    ", "    ", "    ", "    "),
+    "D": ("███ ", "█  █", "█  █", "█  █", "███ "),
+    "E": ("████", "█   ", "███ ", "█   ", "████"),
+    "V": ("█  █", "█  █", "█  █", " ██ ", " ██ "),
+    "O": (" ██ ", "█  █", "█  █", "█  █", " ██ "),
+    "P": ("███ ", "█  █", "███ ", "█   ", "█   "),
+    "S": (" ███", "█   ", " ██ ", "   █", "███ "),
+    "X": ("█  █", " ██ ", " ██ ", " ██ ", "█  █"),
+    "R": ("███ ", "█  █", "███ ", "█ █ ", "█  █"),
+    "T": ("████", " ██ ", " ██ ", " ██ ", " ██ "),
+    "Q": (" ██ ", "█  █", "█  █", "█ ██", " ███"),
+    "U": ("█  █", "█  █", "█  █", "█  █", " ██ "),
+}
+
+
+def ascii_art(text, font=BLOCK_FONT):
+    """`text` in a block font — [] if it uses a letter the font doesn't have."""
+    height = len(next(iter(font.values())))
+    rows = [[] for _ in range(height)]
+    for ch in text.upper():
+        glyph = font.get(ch)
+        if not glyph:
+            return []
+        for r in range(height):
+            rows[r].append(glyph[r])
+    return [" ".join(r).rstrip() for r in rows]
+
+
+def drip(art, depth=5):
+    """The pixel-rain fade under the letters.
+
+    Every filled column of the last row keeps raining, thinner each row, in a
+    shading block that gets lighter as it falls (█ ▓ ▒ ░). It is random on
+    purpose — the banner is never quite the same twice, which is most of the
+    charm — and it only ever falls where a letter actually stood, so the melt
+    reads as the letters bleeding rather than as noise sprayed under them.
+    """
+    if not art or depth < 1:
+        return []
+    width = max(len(ln) for ln in art)
+    live = [i for i, ch in enumerate(art[-1].ljust(width)) if ch != " "]
+    # Each column bleeds its own distance, solid at first and then dithered on a
+    # checkerboard. Random per CELL looks like static; random per COLUMN with a
+    # dither below it looks like the letters are melting, which is the effect.
+    tail = {i: random.randint(max(1, depth // 3), depth) for i in live}
+    rows, shades = [], "▓▓▒▒░"
+    for d in range(depth):
+        row = [" "] * width
+        for i in live:
+            if d >= tail[i]:
+                continue
+            if d < tail[i] / 3 or (i + d) % 2 == 0:
+                row[i] = shades[min(len(shades) - 1, d * len(shades) // max(1, depth))]
+        line = "".join(row).rstrip()
+        if not line:
+            break
+        rows.append(line)
+    return rows
+
+
+def color_depth():
+    """What this terminal can paint: truecolor · 256 · basic · none."""
+    if os.environ.get("NO_COLOR") is not None:
+        return "none"
+    term = os.environ.get("TERM", "")
+    if term == "dumb":
+        return "none"
+    if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+        return "truecolor"
+    if os.name == "nt" or "256" in term:
+        return "truecolor" if os.name == "nt" else "256"
+    return "basic"
+
+
+_BASIC_CYCLE = ("cyan", "blue", "magenta", "red", "yellow", "green")
+
+
+def _hue(i, freq=0.11, phase=0.0):
+    """lolcat's rainbow: three sine waves 120° apart, walked along the line."""
+    return tuple(int(127 * math.sin(freq * i + phase + t) + 128)
+                 for t in (0, 2 * math.pi / 3, 4 * math.pi / 3))
+
+
+def rainbow(text, phase=0.0, freq=0.11):
+    """Paint a plain string with a moving gradient. Colour-blind terminals and
+    NO_COLOR get the text untouched — the banner is decoration, never content."""
+    depth = color_depth()
+    if depth == "none":
+        return text
+    out, i = [], 0
+    for chunk, w in _cells(text):
+        if w == 0:
+            continue                       # the gradient replaces any colour given
+        if not chunk.strip():
+            out.append(chunk)
+            i += w
+            continue
+        r, g, b = _hue(i, freq, phase)
+        if depth == "truecolor":
+            out.append(f"\033[38;2;{r};{g};{b}m{chunk}")
+        elif depth == "256":
+            out.append(f"\033[38;5;{16 + 36 * (r // 43) + 6 * (g // 43) + b // 43}m{chunk}")
+        else:
+            out.append(c(chunk, _BASIC_CYCLE[(i // 4) % len(_BASIC_CYCLE)]))
+        i += w
+    return "".join(out) + COLORS["reset"]
+
+
+QUOTES = [
+    "“It works on my machine” is not a deployment strategy.",
+    "Automate the boring. Rehearse the scary.",
+    "The best time to write the rollback was before the deploy.",
+    "If it isn't in version control, it doesn't exist.",
+    "Pets die, cattle get replaced — name your servers accordingly.",
+    "Every incident is a lesson wearing a disguise.",
+    "Logs are the only witnesses that never lie.",
+    "You don't rise to your tooling; you fall to your runbooks.",
+    "Infrastructure as code, or infrastructure as folklore.",
+    "Ship small, ship often, sleep well.",
+]
+
+
+# The banner's one accent, top row to bottom, then the shades the drip fades
+# through. Amber on a dark terminal is the Kali-tool look this is aiming at.
+INK = (214, 214, 208, 208, 202, 202)
+FADE = (172, 130, 94, 58, 236)
+
+
+def _ink(text, shade, basic="yellow"):
+    """Paint a banner row in one colour, at whatever depth the terminal has."""
+    depth = color_depth()
+    if depth == "none":
+        return text
+    if depth in ("truecolor", "256"):
+        return f"\033[38;5;{shade}m{text}{COLORS['reset']}"
+    return c(text, basic)
+
+
+def _title_art(cols):
+    """The widest arrangement of the title that fits: big font on one line, big
+    on two, then the small font the same way. None when nothing fits."""
+    for font in (BIG_FONT, BLOCK_FONT):
+        for parts in ([TITLE], TITLE.rsplit(" ", 1)):
+            blocks = [ascii_art(p, font) for p in parts]
+            if all(blocks) and max(len(ln) for b in blocks for ln in b) <= cols:
+                return [ln for b in blocks for ln in b], font is BIG_FONT
+    return None, False
+
+
+def chip(text, shade=208, fg=16):
+    """A name set INTO the colour instead of printed next to it.
+
+    Reverse video is the fallback that works on a 1985 terminal and on a
+    Windows console alike, so the badge survives everywhere; only the amber
+    changes with what the terminal can do.
+    """
+    depth = color_depth()
+    if depth == "none":
+        return f"[ {text} ]"
+    if depth in ("truecolor", "256"):
+        return f"\033[48;5;{shade}m\033[38;5;{fg}m\033[1m {text} {COLORS['reset']}"
+    return f"\033[1;7m {text} {COLORS['reset']}"
+
+
+def _byline(width):
+    """`━━━▪ ✦ DEVOPS EXPERTS QUEST ✦ ▪━━━`, centred under the art."""
+    text = f"✦  {TITLE}  ✦"
+    line = pad(text, width, "center")
+    rule_len = min(10, max(0, (width - disp_width(text)) // 2 - 3))
+    if rule_len >= 3:                     # only when it doesn't crowd the words
+        bar = "━" * (rule_len - 1)
+        line = (bar + "▪" + line[rule_len:len(line) - rule_len] + "▪" + bar)
+    return c(line, "cyan")
+
+
+def signature(width):
+    """The credit line — a badge, not a footnote. `crafted by ⟨iCeTePs⟩ · repo`."""
+    mark = c("⚔", "yellow")
+    text = (f"{mark} {c('crafted by', 'dim')} {chip(AUTHOR)} {mark}"
+            f"{c('   ·   ' + REPO, 'dim')}")
+    if disp_width(text) > width:                     # narrow: drop the repo
+        text = f"{mark} {c('crafted by', 'dim')} {chip(AUTHOR)} {mark}"
+    return pad(text, width, "center")
+
+
+def title_card(cols=None, max_rows=None):
+    """The launch banner: block letters, a dithered drip, and the byline.
+
+    Sized in BOTH directions. Wide enough for the whole title in the big font on
+    one line → that; narrower → two lines, then the small font, then a plain
+    framed title (a chopped-up ASCII banner reads as a broken program, not as a
+    small one). Short of ROWS, the drip is what goes first, then the font, then
+    the frame — because a banner that pushes the mission map off the screen has
+    cost more than it gave.
+    """
+    cols = cols or menu_width()
+    max_rows = max_rows if max_rows is not None else 99
+    for font, deep in ((BIG_FONT, 5), (BLOCK_FONT, 3)):
+        for parts in ([TITLE], TITLE.rsplit(" ", 1)):
+            blocks = [ascii_art(p, font) for p in parts]
+            if not all(blocks):
+                continue
+            art = [ln for b in blocks for ln in b]
+            if max(len(ln) for ln in art) > cols or len(art) + 1 > max_rows:
+                continue
+            block = max(len(ln) for ln in art)
+            margin = " " * max(0, (cols - block) // 2)   # one margin for the
+            out = []                                     # block, or it shears
+            for i, line in enumerate(art):
+                out.append(margin + _ink(line, INK[min(i, len(INK) - 1)]))
+            for j, line in enumerate(drip(art, min(deep, max_rows - len(art) - 1))):
+                out.append(margin + _ink(line, FADE[min(j, len(FADE) - 1)], "dim"))
+            out.append(margin + _byline(block))
+            return out
+    if max_rows >= 3:
+        return box([f"🗡️  {TITLE}  🗡️"], cols)
+    return [c(pad(f"🗡️  {TITLE}", cols, "center"), "bold")]
+
+
+# ------------------------------------------------------------------ prompt --
+# The prompt a mission draws is a teaching surface, so the DEFAULT is the plain
+# bash prompt a student will meet on a real server. The powerlevel10k-style ones
+# are opt-in (`theme` in a mission) — see missions/prompt_theme.py.
+PROMPT_THEMES = {
+    "classic": "the real bash prompt — [root@quest-host ~]#",
+    "kali": "Kali's zsh prompt — ┌──(root㉿quest-host)-[~] / └─$",
+    "lean": "powerlevel10k lean: two lines, coloured segments, no backgrounds",
+    "rainbow": "powerlevel10k rainbow: powerline blocks (needs 256 colours)",
+}
+GLYPH_TIERS = {
+    "nerd": "Nerd Font icons —      (install one: `setup`)",
+    "unicode": "emoji and box characters — any modern terminal",
+    "ascii": "no special characters at all",
+}
+PROMPT_THEME, GLYPH_TIER = "classic", "unicode"
+
+# Tab-completion is an assist, and assists cost XP — 1 per completion the game
+# types for you, and never more than ASSIST_CAP in one mission. Default OFF:
+# a student who cannot spell `linux_course` without Tab hasn't learned it yet.
+ASSIST_COST, ASSIST_CAP = 1, 10
+
+
+def set_theme(theme=None, glyphs=None):
+    """Point the prompt at a look. Unknown names are ignored, not fatal."""
+    global PROMPT_THEME, GLYPH_TIER
+    if theme in PROMPT_THEMES:
+        PROMPT_THEME = theme
+    if glyphs in GLYPH_TIERS:
+        GLYPH_TIER = glyphs
+    return PROMPT_THEME, GLYPH_TIER
+
+
+def prompt_theme():
+    """(style, glyph tier) — read at DRAW time so `theme` takes effect at once."""
+    return PROMPT_THEME, GLYPH_TIER
+
+
+def assists_on(profile):
+    return bool((profile.get("assists") or {}).get("complete"))
 
 
 # --------------------------------------------------------------- player OS --
@@ -180,6 +783,134 @@ def edit_keys(line):
         else:
             out.append(ch)
     return "".join(out), keys
+
+
+# ------------------------------------------------------------- key reading --
+# A menu key should DO the thing, not queue it behind Enter. That needs the
+# terminal out of line mode, which is a per-platform job: termios/tty on POSIX,
+# msvcrt on Windows, and neither when input is a pipe (the tests) — where we
+# fall back to reading a whole line and the game plays exactly as before.
+try:
+    import select as _select
+    import termios as _termios
+    import tty as _tty
+except ImportError:                       # pragma: no cover — Windows
+    _select = _termios = _tty = None
+try:
+    import msvcrt as _msvcrt
+except ImportError:                       # pragma: no cover — POSIX
+    _msvcrt = None
+
+# Named keys, so callers bind meaning ("next page") and never byte sequences.
+_ESC_NAMES = {
+    "[A": "up", "[B": "down", "[C": "right", "[D": "left",
+    "OA": "up", "OB": "down", "OC": "right", "OD": "left",
+    "[5~": "pgup", "[6~": "pgdn", "[H": "home", "[F": "end",
+    "[1~": "home", "[4~": "end", "[7~": "home", "[8~": "end",
+    "[Z": "shift-tab", "[3~": "delete",
+}
+_WIN_NAMES = {"H": "up", "P": "down", "K": "left", "M": "right",
+              "I": "pgup", "Q": "pgdn", "G": "home", "O": "end", "S": "delete"}
+
+
+def read_key():
+    """One keypress: a character, or a name like 'right' / 'pgdn' / 'esc'.
+
+    The escape sequence for an arrow arrives as several bytes; a bare Esc is the
+    same first byte with nothing behind it, so the rest is read with a short
+    timeout rather than a blocking read that would swallow the next keystroke.
+    Assumes the terminal is already in cbreak mode (see `prompt_line`).
+    """
+    if _msvcrt:                           # pragma: no cover — Windows
+        ch = _msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            return _WIN_NAMES.get(_msvcrt.getwch(), "")
+        return ch
+    # os.read, NOT sys.stdin.read: the text layer would pull the whole escape
+    # sequence into Python's own buffer, where the select() below — which asks
+    # the OS — can no longer see it. That is precisely how PgUp turns into the
+    # literal text "[5~" appearing in the prompt.
+    fd = sys.stdin.fileno()
+    ch = os.read(fd, 1)
+    if not ch:
+        raise EOFError
+    if ch == b"\x1b":
+        seq = b""
+        try:
+            while _select and _select.select([fd], [], [], 0.05)[0]:
+                seq += os.read(fd, 1)
+                if seq[-1:].isalpha() or seq[-1:] == b"~" or len(seq) > 8:
+                    break
+        except (OSError, ValueError):      # a stdin that can't be selected on
+            pass
+        if not seq:
+            return "esc"
+        return _ESC_NAMES.get(seq.decode("ascii", "replace"), "")
+    if ch[0] < 0x80:
+        return ch.decode("ascii", "replace")
+    extra = 1                              # a UTF-8 lead byte: take its tail too
+    while extra < 4 and ch[0] & (0x80 >> extra):
+        extra += 1
+    return (ch + os.read(fd, extra - 1)).decode("utf-8", "replace")
+
+
+def prompt_line(prompt, keymap=None, preset=""):
+    """Read a line, but let the keys in `keymap` fire the MOMENT they're pressed.
+
+    Returns (text, action). `action` is None for an ordinary Enter-terminated
+    line, otherwise the keymap's value — the caller acts on it and can hand the
+    half-typed text back as `preset`, so paging never costs you what you typed.
+
+    Only bind keys that can never be part of what a player types here (arrows,
+    PgUp/PgDn, Home/End): a menu that eats `n` would be worse than one that
+    needs Enter. Without a tty — piped input, the selftest — this is a plain
+    line read and the keymap simply never fires.
+    """
+    keymap = keymap or {}
+    sys.stdout.write(prompt + preset)
+    sys.stdout.flush()
+    interactive = sys.stdin.isatty() and sys.stdout.isatty() and (_termios or _msvcrt)
+    if not interactive:
+        line = sys.stdin.readline()
+        if not line:
+            raise EOFError
+        return edit_keys(preset + line.rstrip("\n"))[0], None
+    fd = sys.stdin.fileno()
+    saved = _termios.tcgetattr(fd) if _termios else None
+    buf = preset
+    try:
+        if _tty:
+            _tty.setcbreak(fd)            # keys arrive one at a time, no echo
+        while True:
+            key = read_key()
+            if key in keymap:
+                return buf, keymap[key]
+            if key in ("\r", "\n"):
+                return buf, None
+            if key in ("\x7f", "\x08"):
+                if buf:
+                    buf = buf[:-1]
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+            if key == "\x03":
+                raise KeyboardInterrupt
+            if key == "\x04":
+                raise EOFError
+            if key == "esc":              # wipe the line, like Ctrl-U
+                sys.stdout.write("\b \b" * disp_width(buf))
+                sys.stdout.flush()
+                buf = ""
+                continue
+            if len(key) == 1 and key.isprintable():
+                buf += key
+                sys.stdout.write(key)
+                sys.stdout.flush()
+    finally:
+        if saved is not None:
+            _termios.tcsetattr(fd, _termios.TCSADRAIN, saved)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 
 class IO:
@@ -6309,6 +7040,13 @@ SETUP_STEPS = {
             "sudo rpm -Uvh minikube-latest.x86_64.rpm",
         ], "minikube runs a one-node cluster on your laptop; it needs docker (or podman) working first"),
         ("Helm", ["sudo dnf -y install helm"], "if your Fedora is older than the helm package, use the official install script"),
+        ("Nerd Font (optional — for `theme nerd`)", [
+            "mkdir -p ~/.local/share/fonts",
+            "curl -fLo /tmp/Meslo.zip https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Meslo.zip",
+            "unzip -o /tmp/Meslo.zip -d ~/.local/share/fonts",
+            "fc-cache -f",
+        ], "then pick MesloLGS Nerd Font in your terminal's profile settings — without it the "
+           "powerline arrows and icons show as boxes (`theme unicode` needs no font at all)"),
     ],
     "debian": [
         ("Docker Engine", [
@@ -6324,12 +7062,23 @@ SETUP_STEPS = {
             "sudo dpkg -i minikube_latest_amd64.deb",
         ], ""),
         ("Helm", ["sudo apt-get -y install helm"], "or the official get-helm-3 script"),
+        ("Nerd Font (optional — for `theme nerd`)", [
+            "mkdir -p ~/.local/share/fonts",
+            "curl -fLo /tmp/Meslo.zip https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Meslo.zip",
+            "unzip -o /tmp/Meslo.zip -d ~/.local/share/fonts",
+            "fc-cache -f",
+        ], "then pick MesloLGS Nerd Font in your terminal's profile settings — without it the "
+           "powerline arrows and icons show as boxes (`theme unicode` needs no font at all)"),
     ],
     "mac": [
         ("Docker Desktop", ["brew install --cask docker"], "then LAUNCH Docker.app once — the CLI only works while the daemon runs"),
         ("kubectl", ["brew install kubectl"], "Docker Desktop bundles one too; `which kubectl` tells you which wins"),
         ("minikube", ["brew install minikube"], ""),
         ("Helm", ["brew install helm"], ""),
+        ("Nerd Font (optional — for `theme nerd`)", [
+            "brew install --cask font-meslo-lg-nerd-font",
+        ], "then set it as the font in Terminal/iTerm2 preferences — without it the powerline "
+           "arrows and icons show as boxes (`theme unicode` needs no font at all)"),
     ],
     "windows": [
         ("WSL2 (do this first)", ["wsl --install"], "Docker Desktop runs its Linux containers inside WSL2 — without it nothing works"),
@@ -6337,6 +7086,11 @@ SETUP_STEPS = {
         ("kubectl", ["winget install Kubernetes.kubectl"], ""),
         ("minikube", ["winget install Kubernetes.minikube"], ""),
         ("Helm", ["winget install Helm.Helm"], ""),
+        ("Nerd Font (optional — for `theme nerd`)", [
+            "Invoke-WebRequest https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Meslo.zip -OutFile Meslo.zip",
+            "Expand-Archive Meslo.zip -DestinationPath Meslo",
+        ], "then select the .ttf files, right-click → Install, and choose MesloLGS NF in "
+           "Windows Terminal → Settings → your profile → Appearance (`theme unicode` needs no font)"),
     ],
 }
 
@@ -6347,11 +7101,93 @@ def setup_key():
     return PLAYER_OS
 
 
+def prompt_sample(style, tiername):
+    """One line of what a theme looks like, rendered by the theme itself."""
+    if style == "classic":
+        return c("[root@quest-host ~]# ", "cyan")
+    try:
+        from missions import prompt_theme as pt
+        return pt.sample(style, tiername, menu_width() - 6)   # 6 = the indent below
+    except Exception:                     # noqa: BLE001 — a preview is never worth a crash
+        return c("(preview unavailable)", "dim")
+
+
+def emoji_ruler(io):
+    """Show whether this terminal agrees with us about emoji width.
+
+    Two lines that MUST end at the same column if our measurement is right.
+    It is the only honest way to settle it — a program cannot ask the font."""
+    probe = "☸️🗺️🛡️🕵️" * 3
+    io.print(c("   emoji width check — these two lines must END at the same column:", "cyan"))
+    io.print("     " + probe + c("|", "yellow"))
+    io.print("     " + "-" * disp_width(probe) + c("|", "yellow"))
+    io.print(c(f"   they line up → keep `theme emoji {set_emoji_width(None)}`; they don't → "
+               f"`theme emoji {'narrow' if EMOJI_WIDE else 'wide'}`", "dim"))
+
+
+def theme_cmd(io, profile, arg):
+    """`theme` — the prompt's look. No argument prints the menu, with a live
+    sample of each: nobody can pick a Nerd Font theme from a description."""
+    changed = False
+    words = arg.split()
+    if words and words[0] == "emoji":
+        mode = set_emoji_width(words[1] if len(words) > 1 else None)
+        profile["emoji"] = mode
+        if "xp" in profile:
+            save_profile(profile)
+        io.print(c(f"📏 emoji measured as {mode} — every right-aligned column now assumes "
+                   f"{'two columns' if EMOJI_WIDE else 'one column'} for ☸️-style glyphs.", "green"))
+        emoji_ruler(io)
+        return
+    for word in words:
+        if word in PROMPT_THEMES:
+            set_theme(theme=word)
+            changed = True
+        elif word in GLYPH_TIERS:
+            set_theme(glyphs=word)
+            changed = True
+        elif word in ("p10k", "powerlevel10k"):
+            set_theme(theme="lean")
+            changed = True
+        else:
+            io.print(c(f"unknown theme '{word}' — try: " + " · ".join(PROMPT_THEMES)
+                       + "   glyphs: " + " · ".join(GLYPH_TIERS), "yellow"))
+    style, tiername = prompt_theme()
+    if changed:
+        profile["theme"], profile["glyphs"] = style, tiername
+        if "xp" in profile:               # a real profile, not a test stub
+            save_profile(profile)
+        io.print(c(f"🎨 prompt: {style} · glyphs: {tiername}", "green"))
+        io.print("   " + prompt_sample(style, tiername))
+        if style != "classic":
+            for note in wrap_text("(boxes instead of icons? `theme ascii`, or install a Nerd "
+                                  "Font — `setup` has the command for your machine)",
+                                  indent="   "):
+                io.print(c(note, "dim"))
+        return
+    io.print("")
+    io.print(heading(c("🎨 PROMPT THEMES", "bold"), c(f"now: {style} · {tiername}", "dim")))
+    for name, blurb in PROMPT_THEMES.items():
+        mark = c(" ← now", "green") if name == style else ""
+        io.print(fit(f"   {c(name, 'cyan')}{mark}  {c(blurb, 'dim')}", menu_width()))
+        io.print("      " + prompt_sample(name, tiername))
+    io.print(c("\n   glyph sets:", "bold"))
+    for name, blurb in GLYPH_TIERS.items():
+        mark = c(" ← now", "green") if name == tiername else ""
+        io.print(f"      {c(name, 'cyan')}{mark}  {c(blurb, 'dim')}")
+    io.print(c("\n   change either or both:  theme lean nerd · theme kali · theme classic",
+               "dim"))
+    io.print(c("   the themed prompts are two lines: decoration on top, where you type below.",
+               "dim"))
+    io.print("")
+    emoji_ruler(io)
+
+
 def print_setup(io):
     """The `setup` meta-command: install the real tools on the player's machine."""
     key = setup_key()
     io.print("")
-    io.print(c(f"🧰 REAL-MACHINE SETUP — {os_label()}", "bold"))
+    io.print(heading(c(f"🧰 REAL-MACHINE SETUP — {os_label()}", "bold")))
     io.print(c("   This world is simulated; these are the commands for YOUR box.", "dim"))
     if PLAYER_OS == "linux" and PLAYER_DISTRO not in ("fedora", "debian"):
         io.print(c(f"   (no exact recipe for {PLAYER_DISTRO or 'this distro'} — showing the "
@@ -6521,11 +7357,12 @@ class _DemoFeed:
         self.io.write(text)
 
 
-def bind_completion(mission, world):
+def bind_completion(mission, world, on_use=None):
     """Wire the mission's own tab-completion into readline for its duration.
 
     Returns a restore callable — a mission's completer must not leak into the
-    map screen, where filenames mean nothing.
+    map screen, where filenames mean nothing. `on_use` is called once per Tab
+    that actually TYPES something for the player, which is what gets charged.
     """
     fn = mission.get("complete")
     if not (_readline and fn):
@@ -6539,6 +7376,14 @@ def bind_completion(mission, world):
                 matches = fn(world, text)
             except Exception:             # noqa: BLE001 — completion must never crash a mission
                 matches = []
+            # Charge for insertion, not for looking: a Tab that only LISTS the
+            # candidates (several matches, no common prefix beyond what you
+            # typed) has told you nothing you couldn't have read with `ls`.
+            if state == 0 and matches and on_use:
+                typed_for_you = (len(matches) == 1
+                                 or len(os.path.commonprefix(matches)) > len(text))
+                if typed_for_you:
+                    on_use()
             return matches[state] if state < len(matches) else None
 
         _readline.set_completer(completer)
@@ -6557,6 +7402,13 @@ def bind_completion(mission, world):
         return lambda: None
 
 
+# The words that mean "talk to the game, not to the world" — with or without a
+# leading slash. `quit`/`exit` are in here so `/quit` leaves a mission the way
+# `quit` does; everything else is handled in run_mission's meta section.
+META_COMMANDS = ("task", "learn", "setup", "theme", "complete", "os", "help",
+                 "hint", "demo", "demo!", "quit", "exit")
+
+
 def run_mission(mission, profile, io=None):
     """Run one mission. Returns (completed: bool, xp_earned: int, hints: int)."""
     io = io or IO()
@@ -6566,21 +7418,36 @@ def run_mission(mission, profile, io=None):
     xp_earned, hints_used = 0, 0
     demo_used, user_cmds, studied = False, 0, False
     demo_sol = list(mission.get("solution", []))
+    assist_xp = 0                        # what Tab has cost so far, this mission
 
+    def charge_assist():
+        """One completion typed for the player: −1 XP, up to the cap."""
+        nonlocal assist_xp, xp_earned
+        if assist_xp >= ASSIST_CAP:
+            return
+        assist_xp += ASSIST_COST
+        xp_earned = max(0, xp_earned - ASSIST_COST)
+        world.flags["_assist_xp"] = assist_xp      # the prompt shows the tab
+
+    w = menu_width()
     io.print("")
-    io.print(c("═" * 62, "blue"))
-    io.print(c(f"  🗡️  MISSION: {mission['title']}", "bold"))
-    io.print(c("═" * 62, "blue"))
+    io.print(c("═" * w, "blue"))
+    io.print(spread(c(f"  🗡️  MISSION: {mission['title']}", "bold"),
+                    c(f"{sum(o['xp'] for o in objectives)} XP on offer", "dim"), w))
+    io.print(c("═" * w, "blue"))
     io.print(mission["brief"])
     io.print(c(f"\n📖 pairs with the note: {mission.get('vault_note', '—')}"
                "   (`learn` reads it here · `learn cards` drills it)", "dim"))
-    io.print(c("meta-commands: task · hint · demo (watch it solved!) · learn · help · quit\n", "dim"))
+    io.print(c("meta-commands: /task · /hint · /demo (watch it solved!) · /learn · /help "
+               "· /quit    (the slash is optional)\n", "dim"))
 
     def show_task():
+        # Re-measured on every call: `task` is typed after the window may have moved.
+        cols = menu_width()
         io.print(c("\n🎯 Objectives:", "bold"))
         for o in objectives:
             mark = c("✔", "green") if o["done"] else c("·", "dim")
-            io.print(f"  {mark} {o['desc']}  {c('(+' + str(o['xp']) + ' XP)', 'dim')}")
+            io.print(leader(f"  {mark} {o['desc']}", c(f"+{o['xp']} XP", "dim"), cols))
         io.print("")
 
     show_task()
@@ -6616,13 +7483,20 @@ def run_mission(mission, profile, io=None):
                 if i < len(teach):
                     io.print(c(f"     📚 {teach[i]}", "cyan"))
 
-    restore_completion = bind_completion(mission, world)
+    restore_completion = (bind_completion(mission, world, charge_assist)
+                          if assists_on(profile) else lambda: None)
     try:
         while True:
             # A mission with its own shell draws its own prompt (the Linux ones put
             # the working directory in it, because every relative path depends on it).
             prompt = (mission["prompt"](world) if mission.get("prompt")
                       else c(f"({world.inside}) $ " if world.inside else "$ ", "cyan"))
+            # A two-line prompt (the powerlevel10k themes) hands readline only
+            # its LAST line: everything above it is decoration we print, and a
+            # prompt readline can't measure is a prompt it draws twice.
+            head, _nl, prompt = prompt.rpartition("\n")
+            if head:
+                io.print(head)
             try:
                 line = io.input(prompt)
             except (EOFError, KeyboardInterrupt):
@@ -6639,6 +7513,14 @@ def run_mission(mission, profile, io=None):
                 continue
 
             stripped = line.strip().lower()
+            # Meta-commands may be typed with a leading slash — `/task`, `/hint`,
+            # `/quit` — which is how every prompt-driven tool marks "this one is
+            # for the program, not for the world". A slash line that is NOT one
+            # of them (`/tmp/build.sh`, `/usr/bin/env`) is left exactly as typed
+            # and runs in the simulated world; the bare spellings keep working.
+            if stripped.startswith("/") and stripped[1:].split(" ")[0] in META_COMMANDS:
+                stripped = stripped[1:].strip()
+                line = stripped
             if stripped == "task":
                 show_task(); continue
             if stripped == "learn" or stripped.startswith("learn "):
@@ -6661,6 +7543,35 @@ def run_mission(mission, profile, io=None):
             if stripped == "setup":
                 print_setup(io)
                 continue
+            if stripped == "theme" or stripped.startswith("theme "):
+                theme_cmd(io, profile, stripped[5:].strip())
+                continue
+            if stripped == "complete" or stripped.startswith("complete "):
+                arg = stripped[8:].strip()
+                if arg in ("on", "off"):
+                    profile.setdefault("assists", {})["complete"] = (arg == "on")
+                    restore_completion()
+                    restore_completion = (bind_completion(mission, world, charge_assist)
+                                          if assists_on(profile) else lambda: None)
+                    if "xp" in profile:
+                        save_profile(profile)
+                if not assists_on(profile):
+                    io.print(c("⌨  Tab-completion is OFF — you type every character yourself.", "cyan"))
+                    body, tone = (f"`complete on` turns it on. It costs {ASSIST_COST} XP each time "
+                                  f"it finishes a word for you, up to {ASSIST_CAP} XP a mission — "
+                                  "listing the candidates is free."), "dim"
+                elif _readline is None:
+                    body, tone = ("⌨  Tab-completion is ON, but this Python has no readline, so Tab "
+                                  "can't be wired up (on Windows: pip install pyreadline3).", "yellow")
+                else:
+                    for note in wrap_text(f"⌨  Tab-completion is ON — {ASSIST_COST} XP per word it "
+                                          f"finishes for you (cap {ASSIST_CAP}/mission). So far this "
+                                          f"mission: −{assist_xp} XP.", indent=""):
+                        io.print(c(note, "cyan"))
+                    body, tone = "`complete off` when you want the XP back on the table.", "dim"
+                for note in wrap_text(body, indent="   "):
+                    io.print(c(note, tone))
+                continue
             if stripped == "os" or stripped.startswith("os "):
                 arg = stripped[3:].strip()
                 if not arg:
@@ -6674,10 +7585,14 @@ def run_mission(mission, profile, io=None):
                     io.print(c(f"unknown OS '{arg}' — pick one of: linux · mac · windows", "yellow"))
                 continue
             if stripped == "help":
-                io.print(c("🧭 meta:  task (objectives) · hint (nudge, -5 XP) · demo (watch it solved) · "
-                           "learn (📖 the note: cards · quiz · drills · find) · "
-                           "setup (install the real tools) · os (your OS) · "
-                           "quit (back to map)", "cyan"))
+                for meta in wrap_text(
+                        "🧭 meta (the slash is optional):  /task (objectives) · /hint "
+                        "(nudge, -5 XP) · /demo (watch it solved) · /learn (📖 the note: "
+                        "cards · quiz · drills · find) · /theme (prompt look) · "
+                        f"/complete (Tab help, -{ASSIST_COST} XP a word) · /setup (install "
+                        "the real tools) · /os (your OS) · /quit (back to map)",
+                        indent=""):
+                    io.print(c(meta, "cyan"))
                 # A mission with a real shell behind it prints its own manual, with a
                 # page per command — a flag cheat-sheet is a dead end the moment you
                 # need the flag it left out.
@@ -6709,10 +7624,11 @@ def run_mission(mission, profile, io=None):
                     world = World(mission.get("world"))
                     world.flags["repo_name"] = mission.get("repo_name", "repo")
                     restore_completion()          # completion follows the new world
-                    restore_completion = bind_completion(mission, world)
+                    restore_completion = (bind_completion(mission, world, charge_assist)
+                                          if assists_on(profile) else lambda: None)
                     for o in objectives:
                         o["done"] = False
-                    xp_earned, user_cmds = 0, 0
+                    xp_earned, user_cmds, assist_xp = 0, 0, 0
                     demo_sol = list(mission.get("solution", []))
                     io.print(c("🔄 fresh world — watching from the top", "magenta"))
                 if not demo_sol:
@@ -6787,7 +7703,8 @@ def run_mission(mission, profile, io=None):
                                "of asking for a hint.", "magenta"))
                 if demo_used:
                     io.print(c("   (finished after a demo assist — demoed objectives paid no XP)", "dim"))
-                io.print(c(f"   earned {xp_earned} XP · hints used: {hints_used}", "bold"))
+                tab = f" · Tab typed {assist_xp} word(s) for you: −{assist_xp} XP" if assist_xp else ""
+                io.print(c(f"   earned {xp_earned} XP · hints used: {hints_used}{tab}", "bold"))
                 if teach:
                     io.print(c("\n📚 What you just practiced:", "cyan"))
                     for line in teach[:len(objectives)]:

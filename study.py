@@ -28,10 +28,11 @@ drive that isn't mounted must never take the game down with it.
 import os
 import re
 import shutil
-import unicodedata
 
-from engine import COLORS, c, load_config, save_config
+from engine import (COLORS, c, disp_width, heading, leader, load_config, menu_width,
+                    pad, save_config, term_cols)
 
+CLASS_NUM = re.compile(r"^(?:class|c)\s*0*(\d+)\s*$")
 CALLOUT = re.compile(r"^>\s*\[!(\w+)\]([-+]?)\s*(.*)$")
 QUOTE = re.compile(r"^>\s?(.*)$")
 DRILL = re.compile(r"^- \[[ xX]\]\s*(.*)$")
@@ -120,6 +121,14 @@ def find_note(name):
     for title, path in index:                    # 'Class 03 - Git' ⊃ 'Git'
         if want and want in _slug(title):
             return path
+    # `class 3` — the way anyone actually refers to a class, and not a substring
+    # of any title (it's written `Class 03`).
+    m = CLASS_NUM.match(name.strip().lower())
+    if m:
+        for title, path in index:
+            got = re.search(r"class\s*0*(\d+)", title.lower())
+            if got and int(got.group(1)) == int(m.group(1)):
+                return path
     return None
 
 
@@ -225,10 +234,14 @@ def drill_items(text):
 
 # --------------------------------------------------------------- rendering --
 def width():
-    try:
-        return max(48, min(shutil.get_terminal_size().columns, 96)) - 2
-    except Exception:                                  # noqa: BLE001
-        return 78
+    """Prose width — deliberately NOT the whole window.
+
+    The menus in the game stretch to the terminal (see engine.menu_width); a
+    note is a page of text, and a 200-column line of prose is unreadable no
+    matter how much room the window offers. 96 is about the widest a paragraph
+    should ever get.
+    """
+    return max(48, min(term_cols(), 96)) - 2
 
 
 def tint(text, colour):
@@ -256,25 +269,8 @@ def wrap(text, indent="", first=None):
                          else indent, subsequent_indent=indent) or [first or indent]
 
 
-ANSI = re.compile(r"\033\[[0-9;]*m")
 TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
 TABLE_RULE = re.compile(r"^[\s|:-]+$")
-
-
-def disp_width(text):
-    """Printed columns, not characters: colour codes are invisible and an emoji
-    is two cells wide. Get this wrong and every table column drifts."""
-    text = ANSI.sub("", text)
-    total = 0
-    for ch in text:
-        if unicodedata.combining(ch) or ch in "️︎‍":
-            continue
-        total += 2 if unicodedata.east_asian_width(ch) in "WF" else 1
-    return total
-
-
-def pad(text, cols):
-    return text + " " * max(0, cols - disp_width(text))
 
 
 def render_table(rows):
@@ -687,16 +683,22 @@ def list_notes(io, profile, here=()):
 
     Course notes lead, in the order the classes run — the vault holds plenty
     besides, and an alphabetical dump buries the one you're meant to read next.
+    Numbered, and RETURNS the list in the order shown, so the caller can let a
+    reader open one by typing `3` instead of `Class 02 - Docker Networking and
+    Images`.
     """
     index = notes_index()
     if not index:
-        return no_vault(io)
+        no_vault(io)
+        return []
+    w = menu_width()
     io.print("")
-    io.print(c(f"  📚 THE CODEX — {len(index)} notes in {vault_dir()}", "bold"))
+    io.print(heading(c("  📚 THE CODEX", "bold"),
+                     c(f"{len(index)} notes in {vault_dir()}", "dim"), w))
     spine = course_notes()
     ranked = sorted(index, key=lambda x: next(
         (i for i, s in enumerate(spine) if _slug(s) == _slug(x[0])), len(spine)))
-    for title, path in ranked:
+    for n, (title, path) in enumerate(ranked, 1):
         text = read(path) or ""
         cards = card_items(text)
         rec = (profile.get("study") or {}).get(title, {})
@@ -706,14 +708,47 @@ def list_notes(io, profile, here=()):
         if rec.get("quiz_best"):
             bits.append(c(f"quiz {rec['quiz_best']}/{rec.get('quiz_total', '?')}", "green"))
         if any(_slug(title) == _slug(t) for t in here):
-            mark = c("🗡️ ", "magenta")                # the mission you're in
+            mark = c("🗡️", "magenta")                  # the mission you're in
         elif any(_slug(title) == _slug(s) for s in spine):
-            mark = c(" 📘", "dim")                     # pairs with some mission
+            mark = c("📘", "dim")                      # pairs with some mission
         else:
-            mark = "   "
-        io.print(f"  {mark} {c(shown_name(path), 'cyan')}   " + "  ".join(bits))
-    io.print(c("\n   `learn <name>` opens one · `learn find <word>` searches them all "
-               "· `learn cards` drills the deck", "dim"))
+            mark = " "
+        io.print(leader(f"  {c(f'{n:>2}.', 'bold')} {mark} {c(shown_name(path), 'cyan')}",
+                        "  ".join(bits), w))
+    io.print(c("\n   open one by number, by class (`class 3`), or by any word in its name "
+               "· `find <word>` searches them all", "dim"))
+    return ranked
+
+
+def pick_note(query, ranked):
+    """Resolve what a human actually types into one of `ranked`'s titles.
+
+    `3` · `class 3` · `class 03` · `docker` · the whole title. Nobody is going
+    to type "Class 02 - Docker Networking and Images", and asking them to is how
+    a library ends up unused.
+    """
+    q = (query or "").strip().lower()
+    if not q or not ranked:
+        return None
+    if q.isdigit():
+        i = int(q) - 1
+        return ranked[i][0] if 0 <= i < len(ranked) else None
+    m = CLASS_NUM.match(q)
+    if m:
+        want = int(m.group(1))
+        for title, _path in ranked:
+            got = re.search(r"class\s*0*(\d+)", title.lower())
+            if got and int(got.group(1)) == want:
+                return title
+        return None
+    slug = _slug(q)
+    for title, _path in ranked:                  # exact, then contained
+        if _slug(title) == slug:
+            return title
+    for title, _path in ranked:
+        if slug and slug in _slug(title):
+            return title
+    return None
 
 
 def no_vault(io):
