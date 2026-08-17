@@ -12,23 +12,81 @@ commands — against an engine that responds like the real tools do.
 
 No dependencies. Pure Python 3.8+ standard library. Windows/macOS/Linux.
 
+This is what `python quest.py` opens on — one scrollable page, drawn to fit
+whatever window you're in:
+
+```text
+ ███  ████ █  █  ██  ███   ███      ████ █  █ ███  ████ ███  ████  ███
+ █  █ █    █  █ █  █ █  █ █         █     ██  █  █ █    █  █  ██  █
+ █  █ ███  █  █ █  █ ███   ██       ███   ██  ███  ███  ███   ██   ██
+ █  █ █     ██  █  █ █       █      █     ██  █    █    █ █   ██     █
+ ███  ████  ██   ██  █    ███       ████ █  █ █    ████ █  █  ██  ███
+  ██  █  █ ████  ███ ████
+ █  █ █  █ █    █     ██
+ █  █ █  █ ███   ██   ██
+ █ ██ █  █ █       █  ██
+  ███  ██  ████ ███   ██
+  ▓▓▓  ▓▓  ▓▓▓▓ ▓▓▓   ▓▓
+ ━━━━━━━━━▪           ✦  DEVOPS EXPERTS QUEST  ✦            ▪━━━━━━━━━
+    ⚔ crafted by [ iCeTePs ] ⚔   ·   github.com/iceteps/shell-quest
+
+  🗡️  learn DevOps by typing the real commands
+  💭 If it isn't in version control, it doesn't exist.
+───────────────────────────────────────────────────────────────────────
+  reader · Level 2 Tinkerer · 140 XP · 2/30 missions
+  🖥️  real-machine tips: Linux (fedora-family)
+
+🗺️  MISSION MAP ────────────────────────────────────────── 2/30 complete
+
+🐧 Linux ────────────────────────────────────────────────────────── 2/4
+   ✅ 1. First Contact 🐧 — files, trees and permissions · · best 95 XP
+   ✅ 2. Read the Logs 🔎 — grep, processes and disk · · · · best 45 XP
+   🔓 3. Ship the Script 📜 — networking, cron and archives · · +115 XP
+   🔓 4. Dry Run 🧪 — the /tmp rehearsal · · · · · · · · · · ·  +110 XP
+
+🐳 Docker ───────────────────────────────────────────────────────── 0/5
+   🔓 5. Hello, Container 🐳 · · · · · · · · · · · · · · · · ·  +105 XP
+   🔓 6. The Vanishing Container 🕵️ · · · · · · · · · · · · · · · +80 XP
+───────────────────────────────────────────────────────────────────────
+  number = play it · /catchup = the route back · /learn = 📖 the Codex
+  ▾   0%  (scroll for the rest) ↑ ↓ PgUp PgDn · Home · End — no Enter
 ```
-═══════════════════════════════════════════════════
-  🗡️  MISSION: The Vanishing Container 🕵️
-═══════════════════════════════════════════════════
-The demo is in 5 minutes and the app is DOWN...
+
+Type a number and you're in a mission — real commands, real error messages,
+and a 📚 lesson the moment an objective falls:
+
+```text
+  🗡️  MISSION: The Vanishing Container 🕵️                80 XP on offer
+═══════════════════════════════════════════════════════════════════════
+The demo is in 5 minutes and the app is DOWN. A container named 'webapp'
+should be serving on port 8080, but nothing answers. Find out what
+happened, fix the ROOT CAUSE, and bring it back.
+
+📖 pairs with the note: Class 02 - Docker Networking and Images
+meta-commands: /task · /hint · /demo (watch it solved!) · /learn · /quit
+
+🎯 Objectives:
+  · Find the dead container (it's not in the normal list…) · · +10 XP
+  · Read the crash logs to find the root cause · · · · · · · · +15 XP
+  · Fix the root cause and rebuild the image · · · · · · · · · +25 XP
+  · Run the fixed app: detached, port 8080 published · · · · · +20 XP
+  · Prove it answers: curl localhost:8080 · · · · · · · · · ·  +10 XP
 
 $ docker ps
-CONTAINER ID  IMAGE  STATUS  ...
-(nothing)
+CONTAINER ID  IMAGE   STATUS   PORTS   NAMES
+(nothing running — `docker ps -a` also shows stopped containers)
 
 $ docker ps -a
-a1b2c3ef      my-flask-app   Exited (1) 2 minutes ago   webapp
+b5a97d240dab  my-flask-app:latest  Exited (1) 2 minutes ago   webapp
   ✔ OBJECTIVE COMPLETE: Find the dead container  (+10 XP)
+     📚 Crashed containers vanish from `docker ps` — `-a` is where the
+        dead ones go.
 
 $ docker logs webapp
 ModuleNotFoundError: No module named 'flask'
-  ✔ OBJECTIVE COMPLETE: Read the crash logs  (+15 XP)
+  ✔ OBJECTIVE COMPLETE: Read the crash logs to find the root cause  (+15 XP)
+     📚 `docker logs` keeps a container's output even after it dies —
+        read it BEFORE guessing.
 ```
 
 ## Play
@@ -91,6 +149,11 @@ answer are bound, so `2` still means mission 2:
 Every screen that lists options accepts one: `quit` steps back a level, and a
 bare Enter just gives you a fresh prompt, so a stray keystroke can never drop you
 out of what you were reading.
+
+Three environment knobs, for terminals that disagree with the defaults:
+`QUEST_WIDTH=110` caps the layout on an ultrawide monitor, `QUEST_EMOJI=wide`
+fixes right-hand columns that land a character off (same as `theme emoji wide`),
+and `NO_COLOR=1` (or `TERM=dumb`) drops every colour and the title card's paint.
 
 Objectives check **state, not keystrokes** — any correct route wins. Finish a
 mission with **zero hints and no demo** for a +10 XP bonus, and **+5 more** if you
@@ -161,9 +224,9 @@ jobs, `$(date)` substitution, and shell scripts that really run — `exit 3` set
 `sort` collates like a dictionary (not ASCII) because that's what your terminal
 does, and `/etc/passwd` is a real file so `cut -d: -f1 /etc/passwd` works.
 
-It is held to that standard mechanically: `tests/test_shell_vs_bash.py` runs ~300
-cases through **both** the simulated shell and your machine's real bash and fails on
-any divergence — and it runs in CI.
+It is held to that standard mechanically: `tests/test_shell_vs_bash.py` runs 300+
+cases (314 today) through **both** the simulated shell and your machine's real bash
+and fails on any divergence — and it runs in CI.
 
 It also *feels* like a terminal: the prompt carries your working directory
 (`[root@quest-host ~/linux_course/week1]#`), the arrow keys walk your history and
@@ -195,6 +258,7 @@ watch the commands and their real outputs; then replay it yourself for the XP.
 
 ```bash
 python quest.py --link-vault "<your-vault>/Shell Quest Progress.md"
+python quest.py --sync-vault    # re-render that note right now
 ```
 
 ## Missions
@@ -268,7 +332,9 @@ python3 tests/test_keys_and_commands.py      # the map screen, driven through a 
 The third one makes a terminal (`pty.fork`) and plays the game through it: keys
 that act without Enter, escape sequences that must not arrive as text, `/commands`,
 the Codex browser, reflow on resize, and no line ever wider than the window. It
-parks your `progress.json` and puts it back afterwards. All three run in CI.
+brings its own throwaway study vault, and it parks your `progress.json` and
+`quest.config.json` and puts both back afterwards — a test must never cost you
+your save file. All three run in CI, and `main` requires them green.
 
 ## Also in this repo: ⚡ the quick quiz
 
@@ -295,10 +361,25 @@ This repo is built to be forked by classmates:
    (or a new one — register it in `missions/__init__.py`). A mission is:
    - `world` — starting state (images, containers, files, git branches)
    - `objectives` — each with a `check(world)` lambda, XP, and a hint
-   - `solution` — the command list that proves it's beatable (`--selftest` runs it)
+   - `teach` — one micro-lesson per objective, same order: the *transferable
+     concept*, not a restatement of the objective. The lint fails if the two
+     lists are different lengths
+   - `solution` — the command list that proves it's beatable (`--selftest` runs it,
+     and `demo` replays it for the player, so order it inspect → act → verify)
+   - `vault_note` — the study note this mission pairs with, so `learn` finds it
    - optional `handlers` — regex-triggered custom responses for anything the engine
      doesn't simulate natively
-4. Run `python quest.py --selftest` before you PR. That's the whole CI.
+4. Run the three suites before you PR — all three are the CI, and `main` won't
+   take a merge without them green:
+
+   ```bash
+   python quest.py --selftest
+   python tests/test_shell_vs_bash.py
+   python tests/test_keys_and_commands.py
+   ```
+
+   Touched the Linux shell? Add your case to `CASES` in the bash test. Touched a
+   menu, a key or a prompt? Add a check to the keys test.
 
 **Roadmap ideas (PRs welcome):** a timed "incident mode", multi-mission
 campaigns (SkyWatch end-to-end), a shared hall-of-fame file.
