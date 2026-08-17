@@ -25,7 +25,9 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine import IO, World, set_player_os          # noqa: E402
-from missions.linux_shell import HOME, USER, shell, st  # noqa: E402
+from missions import linux_help                      # noqa: E402
+from missions.linux_shell import (HOME, ON_PATH, TOOL_VERSIONS, USER,  # noqa: E402
+                                  shell, st)
 
 set_player_os("linux")
 ANSI = re.compile(r"\033\[[0-9;]*m")
@@ -35,9 +37,20 @@ class Capture(IO):
     def __init__(self):
         super().__init__()
         self.lines = []
+        self._raw = ""
 
     def print(self, *args):
-        self.lines.append(" ".join(str(a) for a in args))
+        self.lines.append(self._raw + " ".join(str(a) for a in args))
+        self._raw = ""
+
+    def write(self, text):
+        """Raw stream bytes, with no newline of their own — `clear`'s escape is
+        the only user. Whatever prints next has to land on the SAME line, or the
+        harness invents a newline the terminal never saw."""
+        self._raw += text
+
+    def text(self):
+        return "\n".join(self.lines + ([self._raw] if self._raw else []))
 
     def input(self, prompt=""):
         raise EOFError
@@ -96,7 +109,7 @@ def run_simulated(cmds):
             shell(world, Match(line), io)
         except Exception as exc:                       # noqa: BLE001
             io.lines.append(f"!!! UNCAUGHT {type(exc).__name__}: {exc}")
-    return "\n".join(io.lines)
+    return io.text()
 
 
 def run_bash(cmds):
@@ -114,7 +127,11 @@ def run_bash(cmds):
         # streams would flag ordering that is an artifact of the harness.
         # HOME points at the sandbox so `$HOME` and a bare `cd` are comparable
         # with the game's own HOME rather than being unaskable questions.
-        env = dict(os.environ, HOME=sandbox)
+        # TERM is pinned for the same reason: the game is a person sitting in a
+        # terminal, and terminfo-driven commands answer a different question
+        # without one — CI runs with TERM=dumb, where `clear` prints nothing at
+        # all. Pinning it asks bash the question the game is actually modelling.
+        env = dict(os.environ, HOME=sandbox, TERM="xterm-256color")
         # No stdin: a case that reads the keyboard must fail fast, not hang CI.
         proc = subprocess.run(["bash", "--noprofile", "--norc", "-c", script],
                               stdin=subprocess.DEVNULL,
@@ -434,6 +451,12 @@ CASES = {
     "chmod 000 blocks wc": ["echo hi > f", "chmod 000 f", "wc -l f"],
     "chmod 000 blocks stdin redirect": ["echo hi > f", "chmod 000 f", "cat < f"],
     "chmod 400 still reads": ["echo hi > f", "chmod 400 f", "cat f"],
+    # The octal drill reads the string back off ls -l, so every route to a mode
+    # string has to print the same one: a named file, several named files, and a
+    # directory listing.
+    "ls -l two named files": ["touch a b", "chmod 750 a", "chmod 600 b", "ls -l a b"],
+    "ls -l dir mixed modes": ["mkdir d", "touch d/a d/b", "chmod 750 d/a", "chmod 600 d/b",
+                              "ls -l d"],
     "setuid shows as s": ["touch f", "chmod 4755 f", "ls -l f"],
     "setgid shows as s": ["touch f", "chmod 2755 f", "ls -l f"],
     "sticky shows as t": ["mkdir d", "chmod 1755 d", "ls -ld d"],
@@ -515,13 +538,95 @@ CASES = {
     "cut no list": ["printf 'a:b\\n' > p", "cut -d: p"],
     "cut bad list": ["printf 'a:b\\n' > p", "cut -d: -fx p"],
     "cut missing file": ["cut -d: -f1 nope"],
+
+    # ---- a directory's own bits actually deny -------------------------------
+    # Until these passed, `chmod` on a DIRECTORY took nothing away, and the
+    # permissions lesson was decoration: the mode changed, the world didn't.
+    "cd into unsearchable dir": ["mkdir d", "chmod 600 d", "cd d"],
+    "cd into unreadable but searchable": ["mkdir d", "chmod 300 d", "cd d", "pwd"],
+    "touch in unwritable dir": ["mkdir d", "chmod 500 d", "touch d/f"],
+    "mkdir in unwritable dir": ["mkdir d", "chmod 500 d", "mkdir d/sub"],
+    "redirect into unwritable dir": ["mkdir d", "chmod 500 d", "echo x > d/f"],
+    "redirect onto read-only file": ["touch f", "chmod 400 f", "echo x > f"],
+    "append onto read-only file": ["echo a > f", "chmod 400 f", "echo b >> f"],
+    "touch existing read-only file": ["touch f", "chmod 400 f", "touch f", "echo $?"],
+    "unwritable dir still readable": ["mkdir d", "touch d/f", "chmod 500 d", "ls d"],
+
+    # ---- --help, where bash's own builtins are inconsistent ----------------
+    # Most bash builtins print help for --help (so answering with the page is
+    # right); `echo` just echoes it, and true/false say nothing.
+    "echo --help is not a flag": ["echo --help"],
+    "true --help says nothing": ["true --help", "echo $?"],
+    "false --help says nothing": ["false --help", "echo $?"],
+
+    # ---- a missing command fails ONE stage, not the whole line -------------
+    # bash reports it, gives the next stage an empty stream and reports the
+    # LAST stage's status — so `nosuchcmd | wc -l` prints 0 and exits 0. The
+    # teaching aside after the error is parenthesised, so normalise drops it
+    # and what is compared here is the real bash line.
+    "unknown command": ["frobnicate"],
+    "unknown command exit code": ["frobnicate", "echo $?"],
+    "unknown command typo": ["pws"],
+    "unknown command is a help topic": ["pipes", "echo $?"],
+    "unknown in a pipeline": ["nosuchcmd | wc -l"],
+    "unknown pipeline exit code": ["nosuchcmd | wc -l", "echo $?"],
+    "unknown mid pipeline": ["echo hi | nosuchcmd | wc -l"],
+    "unknown after &&": ["nosuchcmd && echo yes", "echo $?"],
+    "unknown after ||": ["nosuchcmd || echo fallback"],
+
+    # ---- clear is a program that writes bytes, not a magic screen wipe ------
+    # On a terminal the escape has to go out raw (printed as a line, the extra
+    # newline lands the prompt one row down); redirected or piped it is just
+    # eleven bytes like any other output, and modelling only the first half is
+    # what makes it look like magic.
+    "clear": ["clear"],
+    "clear then a command": ["touch a", "clear", "ls"],
+    "clear redirected": ["clear > f", "wc -c f"],
+    "clear piped": ["clear | wc -c"],
+
+    # ---- the wrong-directory relative path (the hint is an addition) --------
+    "relative path from the wrong dir": ["mkdir -p course/week1", "cd course/week1",
+                                         "touch week1/notes.txt"],
+    "cd to a sibling by bare name": ["mkdir -p course/week1 course/week2",
+                                     "cd course/week1", "cd week2"],
 }
+
+
+def lint_help():
+    """Every command the shell claims to run must have a page behind it.
+
+    `chmod --help` answering "Try 'chmod --help' for more information." was the
+    worst kind of bug: the shell told the student where to look and the place it
+    pointed at was empty. A command on $PATH with no page is that bug waiting.
+    """
+    problems = []
+    documented = set(linux_help.PAGES) | set(linux_help.ALIASES)
+    for cmd in sorted(ON_PATH - set(TOOL_VERSIONS)):
+        if cmd not in documented:
+            problems.append(f"`{cmd}` is on $PATH but has no help page")
+    for title, names in linux_help.GROUPS:
+        for n in names:
+            if not linux_help.known(n):
+                problems.append(f"help index group '{title}' lists unknown '{n}'")
+    for name, target in linux_help.ALIASES.items():
+        if target not in linux_help.PAGES:
+            problems.append(f"alias '{name}' points at missing page '{target}'")
+    for name in linux_help.PAGES:
+        if not linux_help.page(name):
+            problems.append(f"page '{name}' renders empty")
+    return problems
 
 
 def main():
     if not shutil.which("bash"):
         print("bash not found — skipping the differential test.")
         return 0
+    gaps = lint_help()
+    if gaps:
+        print("help coverage problems:")
+        for g in gaps:
+            print(f"  ✗ {g}")
+        return 1
     only = sys.argv[1] if len(sys.argv) > 1 else None
     # An ENV_SPECIFIC name that no longer matches a case is a waiver for
     # nothing — and the next case renamed into that slot would be exempted

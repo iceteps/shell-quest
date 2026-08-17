@@ -20,3 +20,9 @@ jobs:
       # runs every case against the runner's own bash and fails on any drift.
       - name: the simulated shell must agree with real bash
         run: python tests/test_shell_vs_bash.py
+
+      # The map screen only exists when a tty does — keys that act without
+      # Enter, escape sequences that must not arrive as text, reflow on resize.
+      # This makes a pty and drives the game through it.
+      - name: keys, slash commands, scrolling and resize
+        run: python tests/test_keys_and_commands.py
