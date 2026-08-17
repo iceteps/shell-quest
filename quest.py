@@ -7,6 +7,7 @@
     python quest.py --setup              how to install the real tools on your machine
     python quest.py --selftest           lint + prove every mission is completable (CI)
     python quest.py --link-vault <file>  write live progress into an Obsidian note
+    python quest.py --vault <folder>     point `learn` at your study vault (📖 the Codex)
     python quest.py --sync-vault         re-render the vault progress note now
 """
 import os
@@ -65,23 +66,32 @@ def mission_map(profile):
             mark = c("✅", "green") if done else c("🔓", "yellow")
             best = f" · best {profile['completed'][m['id']]['xp']} XP" if done else ""
             print(f"   {mark} {n}. {m['title']}{c(best, 'dim')}")
-    print(c("\n  pick a mission number · 'catchup' for a route · 'q' to quit", "dim"))
+    print(c("\n  pick a mission number · 'catchup' for a route · 'learn' for the 📖 Codex "
+            "· 'q' to quit", "dim"))
     return index
 
 
 # Missed a few classes? This is the order that actually builds on itself, and
 # which of the course's REAL graded assignments each stretch prepares you for.
 CATCHUP_ROUTE = [
-    ("linux", "Linux Fundamentals", "the 10-part Linux assignment (+3 extras)"),
-    ("docker", "Class 01/02 - Docker", "Docker Basics – Assignment 1"),
-    ("git", "Class 03 - Git", "Git Fundamentals: branching, merging & conflicts"),
-    ("k8s", "Class 05 - Kubernetes", "K8s CLI assignment · Core Resources & RBAC · Day-2 Ops"),
-    ("helm", "Class 06 - Helm", "Helm From Scratch · the advanced 'orbit' chart"),
+    ("linux", "Linux Fundamentals",
+     "the 10-part Linux assignment (+ the 3 extra exercises)"),
+    ("docker", "Class 01/02 - Docker",
+     "Docker Basics – Assignment 1 (Dockerfile → build → tag → push)"),
+    ("git", "Class 03 - Git",
+     "Git Fundamentals: branching, merging & conflicts (+ the bonus undo section)"),
+    ("k8s", "Class 05 - Kubernetes",
+     "K8s CLI assignment · Core Resources & RBAC · Day-2 Ops & Resilience"),
+    ("helm", "Class 06 - Helm",
+     "Helm From Scratch (Assignment A) · the advanced 'orbit' chart"),
     ("gitops", "Class 08 - GitOps and CI-CD", None),
-    ("ansible", "Class 11 - Ansible", None),
+    # Two notes, one topic: class 11 is the theory, class 14 is the dockerized
+    # lab that makes it hands-on — read them in that order, play them in that order.
+    ("ansible", "Class 11 - Ansible → then Class 14 - Ansible Lab", None),
     ("terraform", "Class 12 - Terraform", None),
     ("rabbitmq", "Class 13 - RabbitMQ Messaging", None),
-    ("capstone", "SkyWatch Capstone", None),
+    ("capstone", "SkyWatch Capstone",
+     "the graduation project — build SkyWatch for real, then terraform destroy it"),
 ]
 
 
@@ -158,6 +168,24 @@ def play():
             continue
         if choice == "setup":
             print_setup(IO())
+            continue
+        if choice == "learn" or choice.startswith("learn ") or choice in ("codex", "study"):
+            import study
+            arg = choice[6:] if choice.startswith("learn ") else ""
+            io = IO()
+            try:
+                # No mission in hand on the map screen, so `learn` means the
+                # library: browse it, search it, or open any note by name.
+                verb, _, rest = arg.partition(" ")
+                if verb in ("find", "search", "grep") and rest:
+                    study.search(io, rest)
+                elif arg:
+                    study.learn(io, profile, arg, "")
+                else:
+                    study.list_notes(io, profile)
+                save_profile(profile)
+            except Exception as exc:  # noqa: BLE001 — the vault is not ours to trust
+                print(c(f"the vault couldn't be read: {exc}", "yellow"))
             continue
         m = index.get(choice)
         if not m:
@@ -293,6 +321,25 @@ def link_vault(path):
         print(c(f"Config saved, but writing to {path} failed — check the folder exists.", "yellow"))
 
 
+def link_study_vault(path):
+    """Point `learn` at the folder holding the course notes."""
+    import study
+    if not os.path.isdir(os.path.expanduser(path)):
+        print(c(f"no such folder: {path}", "yellow"))
+        print(c("Don't have the notes yet? Clone them, then point at the folder:", "dim"))
+        print(c("  git clone https://github.com/iceteps/devops-study-vault", "cyan"))
+        sys.exit(1)
+    folder = study.set_vault_dir(path)
+    notes = study.notes_index()
+    print(c(f"📖 Codex linked: {folder}  ({len(notes)} notes)", "green"))
+    missing = [m["vault_note"] for m in ALL_MISSIONS if not study.find_note(m["vault_note"])]
+    if missing:
+        print(c(f"   {len(set(missing))} mission note(s) not found there: "
+                + " · ".join(sorted(set(missing))), "yellow"))
+    print(c("   In a mission: `learn` reads it · `learn cards` drills the flashcards · "
+            "`learn quiz` tests you.", "dim"))
+
+
 def set_os_cli(name):
     if name not in OS_NAMES:
         print(c(f"unknown OS '{name}' — pick one of: {' · '.join(OS_NAMES)}", "yellow"))
@@ -305,8 +352,8 @@ def set_os_cli(name):
     print(c("Run `python quest.py --setup` to see the install steps for it.", "dim"))
 
 
-FLAGS = ("--selftest", "--os", "--setup", "--catchup", "--link-vault", "--sync-vault",
-         "--help", "-h")
+FLAGS = ("--selftest", "--os", "--setup", "--catchup", "--link-vault", "--vault",
+         "--sync-vault", "--help", "-h")
 
 
 def usage(stream_note=""):
@@ -343,6 +390,12 @@ if __name__ == "__main__":
             print(c('usage: python quest.py --link-vault "<path>/Shell Quest Progress.md"', "yellow"))
             sys.exit(1)
         link_vault(sys.argv[i + 1])
+    elif "--vault" in sys.argv:
+        i = sys.argv.index("--vault")
+        if i + 1 >= len(sys.argv):
+            print(c('usage: python quest.py --vault "<folder with your .md notes>"', "yellow"))
+            sys.exit(1)
+        link_study_vault(sys.argv[i + 1])
     elif "--sync-vault" in sys.argv:
         written = sync_vault_note(load_profile())
         print(c(f"Progress note refreshed: {written}", "green") if written

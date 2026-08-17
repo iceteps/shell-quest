@@ -9,7 +9,8 @@ Run:
     python quiz.py                # 12 random questions from all topics
     python quiz.py --all          # every question
     python quiz.py --topic linux  # only one topic (linux/docker/git/k8s/helm/
-                                  # ansible/terraform/rabbitmq/gitops/foundations)
+                                  # ansible/terraform/rabbitmq/gitops/capstone/
+                                  # foundations)
     python quiz.py -n 20          # choose how many questions
 """
 import argparse
@@ -250,6 +251,139 @@ QUESTIONS = [
      "options": ["Keep the manual change", "Revert it to match Git — Git is the only truth", "Crash", "Email the CEO"], "answer": 1},
     {"topic": "gitops", "q": "ArgoCD reports OutOfSync. What does that literally mean?",
      "options": ["The cluster is down", "Git's desired state ≠ the cluster's live state", "ArgoCD needs an update", "The repo was deleted"], "answer": 1},
+
+    # ---------------- Linux (round 3 — the 3 extra exercises) ----------------
+    {"topic": "linux", "q": "You run `cp report.txt backup.txt`, then `mv backup.txt archive.txt`. Which files exist at the end?",
+     "options": ["report.txt and archive.txt", "archive.txt only", "report.txt only", "all three"], "answer": 0},
+    {"topic": "linux", "q": "Why doesn't a plain `ls` show `.bashrc`?",
+     "options": ["It belongs to root", "A leading dot is a naming CONVENTION that ls hides unless you pass -a — it is not a permission",
+                 "It lives in a hidden folder", "You'd need sudo"], "answer": 1},
+    {"topic": "linux", "q": "`echo one > log.txt` then `echo two > log.txt`. What is in log.txt?",
+     "options": ["one then two, on two lines", "one", "two — `>` truncates the file to zero bytes before every single write", "an error: file exists"], "answer": 2},
+    {"topic": "linux", "q": "Type the command that deletes the directory `ex1`, which still has files in it:",
+     "accept": ["rm -r ex1", "rm -rf ex1", "rm -r ex1/", "rm -rf ex1/"]},
+    {"topic": "linux", "q": "You run `tar -xf site.tar`. Where do the extracted files land?",
+     "options": ["In /tmp", "Back in the directory they were archived from", "Nowhere — extraction needs -C",
+                 "In your CURRENT working directory — tar unpacks relative to where you stand"], "answer": 3},
+    {"topic": "linux", "q": "You are somewhere deep in /tmp. `cd` with NO arguments takes you...",
+     "options": ["Nowhere — it errors", "To your home directory", "Up one level", "To /"], "answer": 1},
+
+    # ---------------- Docker (round 3 — the Lab B image lab) ----------------
+    {"topic": "docker", "q": "You rebuild with nothing changed: every step prints CACHED and it takes 0.2s instead of 13.9s. Why?",
+     "options": ["Docker skipped the build entirely", "Each instruction is a LAYER — unchanged inputs mean Docker reuses the stored layer instead of re-running it",
+                 "The image came from Docker Hub", "BuildKit compressed it"], "answer": 1},
+    {"topic": "docker", "q": "`docker images` shows python:3 at 1.02GB and python:3-slim at ~150MB. Beyond disk, what does the small base buy you?",
+     "options": ["A faster CPU", "Automatic security patches", "Faster pulls and pushes, plus a much smaller attack surface", "More layers to cache"], "answer": 2},
+    {"topic": "docker", "q": "You created files inside a container, then `docker rm -f` it and ran a fresh one from the SAME image. Your files are...",
+     "options": ["Gone — they lived in that container's writable layer, which died with it (this is what volumes are for)",
+                 "Still there — images keep writes", "Recoverable from /var/lib/docker", "Restored on the next start"], "answer": 0},
+
+    # ---------------- Git (round 3 — the graded bonus section) ----------------
+    {"topic": "git", "q": "`git add .` swept up debug.log. Which command unstages it WITHOUT touching the file on disk?",
+     "options": ["git rm debug.log", "git restore --staged debug.log", "git checkout debug.log", "git clean -f"], "answer": 1},
+    {"topic": "git", "q": "`.env` is already committed, so adding it to .gitignore alone changes nothing. What does `git rm --cached .env` do?",
+     "options": ["Deletes it from disk too", "Rewrites every commit that touched it",
+                 "Stops git TRACKING it while leaving the file on disk — .gitignore then keeps it out", "Nothing without -f"], "answer": 2},
+    {"topic": "git", "q": "When is `git commit --amend` genuinely free of consequences?",
+     "options": ["Always", "While the commit is still LOCAL — amending replaces it, which only hurts once someone else has pulled it",
+                 "Only on main", "Only with --force"], "answer": 1},
+
+    # ---------------- Kubernetes (round 3 — Day-2 Ops & Resilience) ----------------
+    {"topic": "k8s", "q": "Liveness vs readiness probe — one line each:",
+     "options": ["Both restart the container", "Readiness GATES TRAFFIC (fail → pulled out of the Service); liveness RESTARTS the container (fail → killed and restarted)",
+                 "Liveness gates traffic; readiness restarts", "Readiness only runs once at startup"], "answer": 1},
+    {"topic": "k8s", "q": "You ship nginx:1.9999 to a Deployment with `maxSurge: 1, maxUnavailable: 0`. Did users see downtime?",
+     "options": ["Yes — every pod was replaced at once", "Yes, for a few seconds",
+                 "No — with 0 unavailable, K8s never removes an old pod until a new one is Ready, and the new ones never got Ready (ImagePullBackOff)",
+                 "Only if replicas were fewer than 3"], "answer": 2},
+    {"topic": "k8s", "q": "Type the command that instantly reverts deployment `app-deployment` (namespace dev) to its previous revision:",
+     "accept": ["kubectl rollout undo deployment/app-deployment",
+                "kubectl rollout undo deploy/app-deployment",
+                "kubectl rollout undo deployment app-deployment"]},
+    {"topic": "k8s", "q": "requests vs limits — which one does the SCHEDULER use to decide which node a pod fits on?",
+     "options": ["limits", "requests", "both, averaged", "neither — it's random"], "answer": 1},
+    {"topic": "k8s", "q": "A Service returns 503 and `kubectl get endpoints` shows none. First suspect?",
+     "options": ["The nodes are down", "kube-proxy crashed",
+                 "The Service SELECTOR doesn't match the pods' labels — no matching pods, no endpoints", "The image is wrong"], "answer": 2},
+
+    # ---------------- Helm (round 3 — Assignment A) ----------------
+    {"topic": "helm", "q": "values.yaml says replicaCount: 4, `-f values-dev.yaml` says 2, and you add `--set replicaCount=5`. What ships?",
+     "options": ["4", "2", "It errors on the conflict", "5 — precedence is chart values.yaml < each -f file (in order) < --set"], "answer": 3},
+    {"topic": "helm", "q": 'Install into namespace dev fails: `create: failed to create: namespaces "dev" not found`. Type the flag that fixes it:',
+     "accept": ["--create-namespace"]},
+    {"topic": "helm", "q": "Why do pipelines always use `helm upgrade --install` instead of plain `helm install`?",
+     "options": ["It's faster", "It installs when the release is missing and upgrades when it exists — the SAME command works on run 1 and run 50",
+                 "It skips hooks", "install is deprecated"], "answer": 1},
+
+    # ---------------- Ansible (round 3 — playbooks + the class-14 lab) ----------------
+    {"topic": "ansible", "q": "`ansible servers -m ping` prints `[WARNING]: Could not match supplied host pattern`. Most likely cause?",
+     "options": ["SSH is down on the nodes", "The inventory's group isn't called `servers` — compare the [group] header letter by letter",
+                 "Ansible isn't installed", "The nodes need rebooting"], "answer": 1},
+    {"topic": "ansible", "q": "In the dockerized lab, where do you actually run the playbooks?",
+     "options": ["On your laptop, from ansible_lab_files/", "Inside the ansible-control container — the host has no Ansible, no inventory and no SSH keys",
+                 "On node1", "Only through the Semaphore UI"], "answer": 1},
+    {"topic": "ansible", "q": "Adding a node3 to the dockerized lab means editing how many places — and which?",
+     "options": ["One — inventory.ini", "Two — docker-compose.yml and ansible.cfg",
+                 "Three — docker-compose.yml (service + port), inventory.ini, and entrypoint.sh's key-distribution loop",
+                 "None — Ansible discovers new hosts"], "answer": 2},
+    {"topic": "ansible", "q": "Type the flag that runs ONLY the tasks tagged `deploy`:",
+     "accept": ["--tags deploy", "--tags=deploy", "-t deploy"]},
+    {"topic": "ansible", "q": "You `register: r` a `command:` task and branch on `when: r.rc != 0`, but the run dies at the register task. Why, and the fix?",
+     "options": ["Ansible can't register command output — use shell",
+                 "A non-zero rc IS a task failure — add `ignore_errors: true` (or `failed_when: false`) so it can report rc and let `when` decide",
+                 "You forgot become: true", "register only works inside a loop"], "answer": 1},
+
+    # ---------------- Terraform (round 3 — variables, outputs, remote state) ----------------
+    {"topic": "terraform", "q": "In a subnet resource, `vpc_id = aws_vpc.main.id` does what beyond passing an ID?",
+     "options": ["Nothing else", "Creates an IMPLICIT DEPENDENCY — Terraform builds the VPC first, the subnet second, and destroys them in reverse",
+                 "Locks the state file", "Validates the ID format"], "answer": 1},
+    {"topic": "terraform", "q": "You declare a new `output \"vpc_id\"` and plan. Terraform offers to apply it 'without changing any real infrastructure'. Why?",
+     "options": ["A quirk of the CLI", "Outputs live in STATE, not in the cloud — applying only writes the value into the ledger",
+                 "The output is invalid", "It would recreate the VPC"], "answer": 1},
+    {"topic": "terraform", "q": "`terraform init` after uncommenting an S3 backend asks whether to copy existing state. You answer `no`. Then what?",
+     "options": ["Nothing changes", "It destroys the resources",
+                 "Terraform starts with an EMPTY remote state — the resources still exist in AWS but Terraform no longer knows about them (import is the way back)",
+                 "It refuses and exits"], "answer": 2},
+    {"topic": "terraform", "q": "A variable with no `default`, nothing in terraform.tfvars, and no `-var`. What does Terraform do?",
+     "options": ["Uses an empty string", "PROMPTS you for a value — on every single run, which is exactly why TF_VAR_* and -var-file exist",
+                 "Fails immediately", "Skips the resource that uses it"], "answer": 1},
+
+    # ---------------- RabbitMQ (round 3 — durability, acks, fair dispatch) ----------------
+    {"topic": "rabbitmq", "q": "Which combination survives `docker compose restart rabbitmq` with the messages intact?",
+     "options": ["queue durable=True only", "delivery_mode=2 only",
+                 "Both halves: queue declared durable=True AND messages published with delivery_mode=2", "auto_ack=True"], "answer": 2},
+    {"topic": "rabbitmq", "q": "A worker running with `auto_ack=True` is killed mid-message. Those messages are...",
+     "options": ["Requeued to the other worker", "Gone — the broker acked them the moment it delivered them and already considers them done",
+                 "Sent to a dead-letter queue", "Retried after 30 seconds"], "answer": 1},
+    {"topic": "rabbitmq", "q": "A fast worker (2s/job) and a slow one (6s/job), no QoS: round-robin hands each 10 of 20 messages. What does `basic_qos(prefetch_count=1)` change?",
+     "options": ["Nothing measurable", "It doubles throughput",
+                 "The broker only offers the next message after an ACK — so the fast worker takes more (15/5) and the whole batch finishes sooner",
+                 "Both workers receive every message"], "answer": 2},
+    {"topic": "rabbitmq", "q": "`basic_publish(exchange='', routing_key='orders')` — where does the message actually go?",
+     "options": ["Straight into the queue; no exchange involved", "To the DEFAULT exchange, which routes it to the queue whose NAME equals the routing key",
+                 "To every queue on the vhost", "To a topic exchange"], "answer": 1},
+
+    # ---------------- GitOps (round 3) ----------------
+    {"topic": "gitops", "q": "You `git revert` the bad tag-bump commit locally and the cluster doesn't budge. Why?",
+     "options": ["ArgoCD is broken", "ArgoCD watches the REMOTE repo — until you push, your revert doesn't exist as far as it's concerned",
+                 "revert can't undo a bot commit", "You still need kubectl apply"], "answer": 1},
+    {"topic": "gitops", "q": "CI pushes `myapp:latest` and ArgoCD happily reports Synced. What is still broken?",
+     "options": ["Nothing — Synced is Synced", "`:latest` is not a commit — the manifest never changes, so ArgoCD can't tell releases apart or roll one back",
+                 "Synced actually means failed", "latest is fine in production"], "answer": 1},
+
+    # ---------------- SkyWatch capstone (the graduation project) ----------------
+    {"topic": "capstone", "q": "kube-prometheus-stack times out installing on the t3.micro API server. The two-step fix is...",
+     "options": ["A bigger node", "helm install --wait --timeout 10m",
+                 "Apply the CRDs with `kubectl apply --server-side` FIRST, then `helm install --skip-crds` — you need both halves", "Install Grafana alone"], "answer": 2},
+    {"topic": "capstone", "q": "The rabbitmq:3.13-management image auto-starts a Prometheus metrics endpoint on which port?",
+     "accept": ["15692"]},
+    {"topic": "capstone", "q": "What does a ServiceMonitor actually do?",
+     "options": ["Restarts unhealthy Services", "Tells Prometheus which Service and port to scrape — without it the RabbitMQ panel just says 'No data'",
+                 "Monitors systemd units", "Generates a Grafana dashboard"], "answer": 1},
+    {"topic": "capstone", "q": "Both k3s workers fail to join with `curl: (28) ... port 6443 ... Connection timed out`. The playbook joins on the master's PUBLIC IP. Why does that break?",
+     "options": ["Port 6443 isn't open on the master at all", "k3s refuses public addresses",
+                 "The token is wrong",
+                 "Traffic to the public IP leaves via the internet gateway, so the security group's self-referencing rule never matches — join on the PRIVATE IP"], "answer": 3},
 ]
 
 TOPIC_NAMES = {
@@ -257,6 +391,7 @@ TOPIC_NAMES = {
     "docker": "🐳 Docker", "git": "🌿 Git", "k8s": "☸️ Kubernetes", "helm": "⎈ Helm",
     "ansible": "📜 Ansible", "terraform": "🏗️ Terraform", "rabbitmq": "📨 RabbitMQ",
     "gitops": "🔁 GitOps/CI-CD", "foundations": "🧭 Foundations",
+    "capstone": "🛰️ SkyWatch capstone",
 }
 
 

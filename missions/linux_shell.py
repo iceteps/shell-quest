@@ -35,12 +35,22 @@ so pipes, redirection, exit codes and `&&` all compose the way they do in bash;
 A script is not a separate dialect: `./s.sh` runs its lines through this same
 run_line(), so `exit 3`, `$1`, pipes and redirection inside a script behave
 exactly as they do at the prompt.
+
+Behaving like bash is only half of it — it has to FEEL like a terminal, or the
+student spends their attention on the simulation instead of on Linux. So the
+prompt carries the working directory (every relative path depends on it), the
+missions hand the engine `prompt`/`complete` so arrow keys, history and Tab
+work through readline, `clear` really clears, and every command answers
+`--help` with a page from `linux_help.py` — the same page `help ls` and
+`man ls` print.
 """
+import difflib
 import json
 import re
 from datetime import datetime
 
-from engine import c, in_real_world, real_world_entry
+from engine import c, in_real_world, pick, real_world_entry
+from missions import linux_help
 
 HOME = "/root"
 USER = "root"
@@ -123,21 +133,29 @@ def st(world):
     f = world.flags
     if "cwd" not in f:
         f["cwd"] = HOME
-        f["dirs"] = {"/", "/root", "/tmp", "/etc", "/usr", "/usr/bin", "/var", "/var/log"}
-        f["modes"] = {}
-        f["procs"] = {}
-        f["next_pid"] = 4821
-        f["cron"] = []
-        f["last_code"] = 0
+        # A mission may arrive with state already in flags (a workspace the
+        # previous mission built), so merge rather than overwrite.
+        f["dirs"] = set(f.get("dirs", ())) | {"/", "/root", "/tmp", "/etc", "/usr",
+                                              "/usr/bin", "/var", "/var/log"}
+        f.setdefault("modes", {})
+        f.setdefault("procs", {})
+        f.setdefault("next_pid", 4821)
+        f.setdefault("cron", [])
+        f.setdefault("last_code", 0)
         for path, body in SYSTEM_FILES.items():
             world.files.setdefault(path, body)
         for name in list(world.files):          # seed files land in HOME
             if not name.startswith("/"):
                 world.files[f"{HOME}/{name}"] = world.files.pop(name)
+        # A file cannot exist without the directories above it. Deriving them
+        # keeps `ls` and `cd` telling the same story about a seeded workspace —
+        # a listing that shows a folder `cd` then denies is the worst kind of lie.
+        for path in list(world.files):
+            parent = path.rsplit("/", 1)[0]
+            while parent and parent not in f["dirs"]:
+                f["dirs"].add(parent)
+                parent = parent.rsplit("/", 1)[0]
     return f
-
-
-EMPTY_PATH = object()          # distinguishes "" from a legitimately resolved path
 
 
 def abspath(world, p):
@@ -238,7 +256,11 @@ def mkdir_one(world, p, parents=False, shown=None):
     if isfile(world, p):
         return f"mkdir: cannot create directory '{shown}': File exists"
     if not parents and not isdir(world, parent):
-        return f"mkdir: cannot create directory '{shown}': No such file or directory"
+        hint = enoent_hint(world, shown)
+        return (f"mkdir: cannot create directory '{shown}': No such file or directory"
+                + ("\n" + hint if hint else ""))
+    if isdir(world, parent) and not (writable(world, parent) and searchable(world, parent)):
+        return f"mkdir: cannot create directory '{shown}': Permission denied"
     if isdir(world, p):
         return None if parents else f"mkdir: cannot create directory '{shown}': File exists"
     acc = ""
@@ -256,6 +278,13 @@ def write_file(world, p, content, append=False):
         return f"bash: {p}: Is a directory"
     if not isdir(world, parent):
         return f"bash: {p}: No such file or directory"
+    # Creating a file is a WRITE to its directory. A directory you can't write
+    # (or can't enter) refuses it — otherwise `chmod` on a directory teaches
+    # nothing, because nothing it takes away is ever missed.
+    if p not in world.files and not (writable(world, parent) and searchable(world, parent)):
+        return f"bash: {p}: Permission denied"
+    if p in world.files and not writable(world, p):
+        return f"bash: {p}: Permission denied"
     if append and p in world.files:
         # `>>` appends bytes, nothing more — it does NOT insert a separator.
         world.files[p] = world.files[p] + content
@@ -559,14 +588,6 @@ IP_A = ("1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN gro
         "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP\n"
         "    inet 10.0.2.15/24 brd 10.0.2.255 scope global dynamic eth0\n"
         "    inet6 fe80::a00:27ff:fe4e:66a1/64 scope link")
-PING4 = ("PING google.com (142.250.185.78) 56(84) bytes of data.\n"
-         "64 bytes from google.com: icmp_seq=1 ttl=117 time=12.4 ms\n"
-         "64 bytes from google.com: icmp_seq=2 ttl=117 time=11.9 ms\n"
-         "64 bytes from google.com: icmp_seq=3 ttl=117 time=12.7 ms\n"
-         "64 bytes from google.com: icmp_seq=4 ttl=117 time=12.1 ms\n"
-         "\n--- google.com ping statistics ---\n"
-         "4 packets transmitted, 4 received, 0% packet loss, time 3005ms\n"
-         "rtt min/avg/max/mdev = 11.902/12.275/12.700/0.301 ms")
 
 # The DevOps tools ARE installed on this host — `which docker` says so, and `setup`
 # tells the player to version-check them. They're just taught in other missions.
@@ -600,17 +621,107 @@ ON_PATH = {
     "groups", "hostname", "uname", "which", "less", "more", "true", "false", "sudo",
 } | set(TOOL_VERSIONS)
 
-HELP_LINES = [
-    "   files: ls (-l -a -R -d) · cd · pwd · mkdir (-p) · touch · cat · cp (-r) · mv · rm (-r -d) · rmdir",
-    "   text:  echo (-n -e) · printf · grep (-i -v -n -c -r -l -w -q -E -F) · cut (-d -f -c) · sort (-n -r -u)",
-    "          uniq (-c) · head · tail · wc · tac · seq · find (-name -type -maxdepth) · basename · dirname",
-    "   perms: chmod (600 · 4755 · u+x · -R) · ls -l to read the triads · chown · sudo",
-    "   procs: sleep N & · jobs · ps (aux) · kill (-9) · date · crontab (-l -e)",
-    "   system: df (-h) · du (-sh) · ip a · ping -c N · uname (-r -a) · whoami · id · history · which · type",
-    "   archives: tar (-cvf -tvf -xvf -z) · gzip · gunzip",
-    "   shell: | and |& pipes · > >> < 2> 2>&1 · ; && || · $? exit codes · {1,2,3} braces · *.txt globs",
-    "          $(date) substitution · scripts with #! and $1 $2 $# · edit <file> · /etc/passwd is real",
-]
+def print_help_index(io):
+    """What `help` prints: every command this shell has, with what it DOES.
+
+    The old version was a flag cheat-sheet with no way to go deeper, which is a
+    dead end the moment you need the third flag. Each name here has a real page
+    behind it — `help ls`, `ls --help` and `man ls` all reach it.
+    """
+    io.print(c("🐧 This is a Linux shell. Everything below really runs here.", "bold"))
+    io.print(c("   help <name>  ·  <name> --help  ·  man <name>   → the full page for one of them",
+               "cyan"))
+    for title, names in linux_help.GROUPS:
+        io.print(c(f"\n  {title}", "bold"))
+        width = max(len(n) for n in names)
+        for n in names:
+            io.print(f"   {c(n.ljust(width), 'cyan')}  {c(linux_help.summary(n), 'dim')}")
+    io.print(c("\n   the tools taught in other missions (docker · git · kubectl · helm · "
+               "terraform · ansible) are installed here but not wired up", "dim"))
+
+
+def real_tool_note(name):
+    """Every page ends by pointing at the real tool. The pages here describe what
+    THIS shell implements — the authority on the rest is the binary on the
+    player's own machine, and saying so is the difference between a manual and a
+    walled garden."""
+    if name not in ON_PATH or name in TOOL_VERSIONS:
+        return ""                       # topics and other missions' tools have no binary
+    return "\n" + pick({
+        "windows": f"\nThe full GNU page is one WSL or Git Bash away: `{name} --help` there.",
+        "*": f"\nYour own machine has the real one: `{name} --help` in a terminal prints "
+             "every flag.",
+    })
+
+
+def prompt(world):
+    """The shell's own prompt — Fedora's default for root, cwd and all.
+
+    A prompt with no cwd in it is the single most disorienting thing about a
+    simulated shell: every path you type is relative to a place you can't see,
+    so `touch week1/notes.txt` fails from the wrong directory and looks like a
+    bug in the game. Real bash tells you where you are; so does this.
+    """
+    return c(f"[{USER}@{HOSTNAME} {pretty(world, st(world)['cwd'])}]# ", "cyan")
+
+
+def complete(world, text):
+    """Tab-completion candidates for `text`: command names and paths.
+
+    Returned bare, with no trailing `/` or space: readline appends its own
+    separator after a unique match, and a marker of ours would land on the
+    wrong side of it.
+    """
+    f = st(world)
+    names = ON_PATH | set(linux_help.PAGES) | {"help", "man", "edit", "jobs",
+                                               "history", "clear", "type", "exit"}
+    out = [n for n in names if n.startswith(text)] if "/" not in text else []
+    head, sep, tail = text.rpartition("/")
+    if sep:
+        # `/et` splits into head="" — which is the ROOT directory, not "no
+        # directory given". Reading it as the latter completed `/et<TAB>`
+        # against the cwd and found nothing, in the missions whose whole
+        # subject is absolute vs relative paths.
+        base, prefix = abspath(world, head or "/"), head + "/"
+    else:
+        base, prefix = f["cwd"], ""
+    if isdir(world, base):
+        out += [prefix + n for n in children(world, base)
+                if n.startswith(tail) and (tail.startswith(".") or not n.startswith("."))]
+    return sorted(set(out))
+
+
+def enoent_hint(world, typed, whole=False):
+    """'No such file or directory' is true but rarely useful on its own.
+
+    The overwhelmingly common cause is a relative path typed from the wrong
+    directory — the folder DOES exist, just not under the cwd. Say so, and say
+    where it is, because that is the lesson (paths are relative to `pwd`).
+    `whole` asks about the path itself (cd) rather than its parent (touch).
+    """
+    f = st(world)
+    if typed.startswith(("/", "~", "$")):
+        return None
+    missing = abspath(world, typed)
+    if not whole:
+        missing = missing.rsplit("/", 1)[0]
+        if isdir(world, missing):
+            return None                 # the parent is fine; something else failed
+    wanted = missing.rsplit("/", 1)[-1]
+    elsewhere = [d for d in sorted(f["dirs"]) if d.rsplit("/", 1)[-1] == wanted
+                 and d != missing]
+    if not elsewhere:
+        return None
+    tail = "" if whole else "/" + typed.rsplit("/", 1)[-1]
+    # `touch week1/notes.txt` while standing IN week1: the directory isn't
+    # somewhere else, it's underfoot. Naming it again is the whole mistake.
+    if f["cwd"] in elsewhere:
+        return c(f"   (you are already inside {wanted} — from here the path is just "
+                 f"{tail.lstrip('/') or '.'}, with no {wanted}/ in front of it)", "dim")
+    where = pretty(world, elsewhere[0])
+    return c(f"   (paths are relative to where you stand, and you are in "
+             f"{pretty(world, f['cwd'])} — {wanted} is at {where}, so try {where}{tail})",
+             "dim")
 
 
 # ---------------------------------------------------------------- builtins --
@@ -623,6 +734,13 @@ def _ls(world, args, f, tty=True):
     dironly = any(a.startswith("-") and not a.startswith("--") and "d" in a for a in args)
     targets = [a for a in args if not a.startswith("-")] or ["."]
     out, errs = [], []
+
+    def saw(path):
+        """Remember WHICH path's mode string was printed. `ls -l` somewhere else
+        is not proof that the student read the bits on THIS file, and the octal
+        drill is exactly 'set it, then read the string back'."""
+        f["saw_perms"] = True
+        f.setdefault("perms_seen", set()).add(path)
 
     def listing(d, label=None):
         names = children(world, d)
@@ -638,7 +756,7 @@ def _ls(world, args, f, tty=True):
             for n in names:
                 full = d.rstrip("/") + "/" + n if n not in (".", "..") else d
                 if full in f["modes"]:
-                    world.flags["saw_perms"] = True
+                    saw(full)
                 size = len(world.files.get(full, "")) if isfile(world, full) else 4096
                 block.append(f"{mode_str(world, full)} 1 {USER} {USER} {size:>6} Aug 15 14:32 {n}")
         elif names:
@@ -650,7 +768,7 @@ def _ls(world, args, f, tty=True):
         if isfile(world, p):
             if long:
                 if p in f["modes"]:
-                    world.flags["saw_perms"] = True
+                    saw(p)
                 out.append(f"{mode_str(world, p)} 1 {USER} {USER} "
                            f"{len(world.files[p]):>6} Aug 15 14:32 {t}")
             else:
@@ -658,7 +776,7 @@ def _ls(world, args, f, tty=True):
         elif isdir(world, p) and dironly:
             if long:
                 if p in f["modes"]:
-                    world.flags["saw_perms"] = True
+                    saw(p)
                 out.append(f"{mode_str(world, p)} 1 {USER} {USER} "
                            f"{4096:>6} Aug 15 14:32 {t}")
             else:
@@ -1138,6 +1256,9 @@ class _Sink:
     def input(self, prompt=""):
         return self._io.input(prompt)
 
+    def write(self, text):
+        self._io.write(text)          # `clear` inside a script still clears
+
 
 def run_script(world, io, path, explicit=False, shown=None, script_args=()):
     """Run a shell script: its lines, through this same shell."""
@@ -1196,6 +1317,37 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
                    "On your own box it's what stands between a typo and a broken system)", "dim"))
         return run_cmd(world, io, args, stdin=stdin, tty=tty)
 
+    # `--help` is a flag on every one of these tools, and it must answer with the
+    # page — a student who types `chmod --help` after "Try 'chmod --help'" and
+    # gets the same refusal back learns that the shell is lying to them. GNU
+    # prints to stdout and exits 0, so this pipes: `ls --help | grep -i recurs`.
+    # bash 5's builtins do answer --help (`pwd --help`, `kill --help`), so the
+    # page is the honest response — except for the three that famously don't:
+    # `echo --help` prints "--help", `true`/`false` print nothing at all.
+    if "--help" in args and linux_help.known(prog) and prog not in ("echo", "true", "false", ":"):
+        world.flags["_noop"] = True
+        return ok(linux_help.page(prog) + real_tool_note(prog))
+
+    if prog in ("help", "man", "info"):
+        topic = next((a for a in args if not a.startswith("-")), "")
+        if not topic:
+            if prog == "man":
+                return fail("What manual page do you want?\nFor example, try 'man man'.")
+            print_help_index(io)
+            world.flags["_noop"] = True
+            return ok()
+        world.flags["_noop"] = True
+        text = linux_help.page(topic)
+        if text:
+            if prog == "man":
+                io.print(c("(a real `man` page is longer and opens in a pager — press q to "
+                           "leave one. This is the short version.)", "dim"))
+            return ok(text + real_tool_note(topic))
+        near = difflib.get_close_matches(topic, linux_help.PAGES, n=1, cutoff=0.6)
+        return fail(f"No manual entry for {topic}"
+                    + (f"  (did you mean: {near[0]}?)" if near else "")
+                    + "\nType `help` for everything this shell knows.")
+
     # "" resolves to the cwd, which would make `rm ""` or `mkdir ""` do something
     # surprising. Every real tool rejects it outright.
     if prog in PATH_TAKING and any(a == "" for a in args):
@@ -1221,7 +1373,13 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
         if isfile(world, target):
             return fail(f"bash: cd: {raw}: Not a directory")
         if not isdir(world, target):
-            return fail(f"bash: cd: {raw}: No such file or directory")
+            hint = enoent_hint(world, raw, whole=True)
+            return fail(f"bash: cd: {raw}: No such file or directory"
+                        + ("\n" + hint if hint else ""))
+        # x on a directory means "may enter" — without it, cd is denied even for
+        # a directory you own. `chmod 600 dir` locking you out IS the lesson.
+        if not searchable(world, target):
+            return fail(f"bash: cd: {raw}: Permission denied")
         f["oldpwd"], f["cwd"] = f["cwd"], target
         return ok()
 
@@ -1270,7 +1428,12 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
             if not isfile(world, p):
                 e = write_file(world, p, "")
                 if e:
-                    errs.append(f"touch: cannot touch '{t}': No such file or directory")
+                    reason = ("Permission denied" if "Permission denied" in e
+                              else "No such file or directory")
+                    errs.append(f"touch: cannot touch '{t}': {reason}")
+                    hint = enoent_hint(world, t)
+                    if hint and reason.startswith("No such"):
+                        errs.append(hint)
         return Res("", "\n".join(errs), 1 if errs else 0)
 
     if prog == "echo":
@@ -1788,6 +1951,9 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
 
     if prog == "crontab":
         if any(a.startswith("-") and "l" in a for a in args):
+            # An objective that says "read it back" has to be able to tell
+            # whether the player did: installing a line is not seeing it.
+            f["crontab_listed"] = True
             return ok("\n".join(f["cron"])) if f["cron"] else fail(f"no crontab for {USER}", 1)
         if any(a.startswith("-") and "r" in a for a in args):
             f["cron"] = []
@@ -1925,7 +2091,20 @@ def run_cmd(world, io, argv, stdin=None, tty=True):
         return ok("\n".join(f"  {i}  {cmd}" for i, cmd in enumerate(world.history, 1)))
 
     if prog == "clear":
-        return ok("\033[2J\033[H")
+        # What the real `clear` sends, in this order: home the cursor, clear the
+        # screen, clear the SCROLLBACK too (that last one is why a half-clear
+        # leaves the old commands scrollable and the prompt in the wrong row).
+        seq = "\033[H\033[2J\033[3J"
+        if not tty:
+            # `clear` is not magic, it is a program that writes bytes to stdout —
+            # which is why `clear > f` fills a file with escapes and leaves the
+            # screen alone. Modelling that is what stops it looking like magic.
+            return stream(seq)
+        # On a terminal it must go out RAW: printed as a normal line, the extra
+        # newline is what pushes the prompt off row 1.
+        io.write(seq)
+        world.flags["_noop"] = True
+        return ok()
 
     if prog in ("which", "command", "type", "whereis"):
         names = [a for a in args if not a.startswith("-")]
@@ -2111,8 +2290,11 @@ def _exec_pipeline(world, io, stages, background, pipe_ops=()):
         to_tty = is_last and not any(op in (">", ">>") for op, _ in redirs)
         res = run_cmd(world, io, argv, stdin=stdin, tty=to_tty)
         if res is FALLTHROUGH:
+            # bash reports the missing command and carries on: the rest of the
+            # pipeline still runs, on an empty stream, and the pipeline's status
+            # is the LAST stage's — `nosuchcmd | wc -l` prints 0 and exits 0.
             teach_unknown(world, io, argv[0])
-            return 127
+            res = Res("", "", 127)
         code = res.code
         err_target = next((t for op, t in redirs if re.fullmatch(r"\d>>?", op)
                            and op[0] == "2"), None)
@@ -2143,6 +2325,9 @@ def _exec_pipeline(world, io, stages, background, pipe_ops=()):
                 err = write_file(world, abspath(world, target), blob, append=(op == ">>"))
                 if err:
                     io.print(re.sub(r"bash: \S+:", f"bash: {target}:", err))
+                    hint = enoent_hint(world, target) if "No such" in err else None
+                    if hint:
+                        io.print(hint)
                     return 1
                 wrote = True
         if is_last:
@@ -2255,7 +2440,31 @@ def teach_unknown(world, io, prog):
         io.print(c("   " + follow, "dim"))
         return
     io.print(f"bash: {prog}: command not found")
-    io.print(c("   this mission is a Linux shell — `help` lists everything it understands", "dim"))
+    # `pipes`, `globs`, `permissions` … are pages about IDEAS, not programs.
+    # Typing one is a fair thing to try, and answering "did you mean: pipes?" to
+    # somebody who just typed `pipes` is the least useful sentence in the game.
+    if prog in linux_help.PAGES and prog not in ON_PATH:
+        io.print(c(f"   ({prog} is a shell concept, not a program — `help {prog}` "
+                   "is the page about it)", "dim"))
+        return
+    # A one-character typo is the likeliest reason a real command isn't found,
+    # and `pws` deserves "did you mean pwd?" rather than a reading assignment.
+    # difflib alone ranks the SHORTER `ps` above `pwd` there, so same-length
+    # candidates (one wrong key, not a missing one) come first.
+    near = [m for m in difflib.get_close_matches(
+        prog, sorted(ON_PATH | set(linux_help.PAGES)), n=3, cutoff=0.6) if m != prog]
+    near.sort(key=lambda m: abs(len(m) - len(prog)))
+    if near:
+        # `pick` is engine.pick at module scope — shadow it only locally, and
+        # only for the two words that go in the message.
+        io.print(c(f"   (did you mean: {' or '.join(near[:2])}?  "
+                   f"`{near[0]} --help` explains it)", "dim"))
+    else:
+        # Parenthesised like every other teaching aside in the game: the house
+        # style, and what tells the bash differential test an addition from a
+        # divergence.
+        io.print(c("   (this mission is a Linux shell — `help` lists everything it "
+                   "understands, `help <name>` explains one)", "dim"))
 
 
 # Catch-all, but `quit`/`exit` must fall THROUGH to the engine: handlers dispatch

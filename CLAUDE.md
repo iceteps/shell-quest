@@ -25,17 +25,18 @@ The second one, for anything touching the 🐧 Linux shell:
 python tests/test_shell_vs_bash.py
 ```
 
-Runs ~150 command cases through both the simulated shell and the machine's **real bash**, and fails on any divergence. Both run in CI. Note what the selftest does NOT prove: it only replays winning solutions, so it says a mission is *completable*, never that it is *pleasant*. Wrong commands, meta-commands and quitting are a separate pass — play the mission by hand before shipping it.
+Runs ~300 command cases through both the simulated shell and the machine's **real bash**, and fails on any divergence, and lints that every command on the shell's `$PATH` has a help page. Both run in CI. Note what the selftest does NOT prove: it only replays winning solutions, so it says a mission is *completable*, never that it is *pleasant*. Wrong commands, meta-commands and quitting are a separate pass — play the mission by hand before shipping it.
 
 ## How the game works (design rules)
 
 - `engine.py` holds a `World` (containers, images, networks, host files, git state, and an optional `k8s` cluster with a real reconcile loop — deleting an owned pod respawns it) and simulates commands against it. Missions win by **checking world state, never by matching keystrokes** — any correct command route must win.
-- Engine-native commands: `docker` (incl. `docker compose`), `git`, `kubectl`, `minikube`. Helm/ansible/terraform/argocd/pika live as **mission-local handlers** in their topic modules (`helm_release.py`, `ansible_ops.py`, `terraform_infra.py`, `gitops_ci.py`, `rabbitmq_queue.py`) per the promote-only-when-2+-missions-need-it rule.
-- Missions are dicts: `world` (starting state), `objectives` (each: `desc`, `xp`, `hint`, `check(world)` lambda), `solution` (proves completability — mandatory; it also powers `demo`), optional `handlers` (regex → function, for behavior the engine doesn't simulate natively; they run BEFORE generic dispatch and can override anything).
+- Engine-native commands: `docker` (incl. `docker compose`), `git`, `kubectl`, `minikube`. Helm/ansible/terraform/argocd/pika live as **mission-local handlers** in their topic modules (`helm_release.py`, `ansible_ops.py`, `ansible_lab.py`, `terraform_infra.py`, `gitops_ci.py`, `rabbitmq_queue.py`) per the promote-only-when-2+-missions-need-it rule.
+- Missions are dicts: `world` (starting state — `files`, and `flags` for state a previous mission left behind), `objectives` (each: `desc`, `xp`, `hint`, `check(world)` lambda), `solution` (proves completability — mandatory; it also powers `demo`), optional `handlers` (regex → function, for behavior the engine doesn't simulate natively; they run BEFORE generic dispatch and can override anything), and optional UI hooks `prompt(world)`, `help_fn(io)` and `complete(world, text)` — a mission with its own shell draws its own prompt, prints its own manual and offers its own Tab-completion.
 - Hints cost 5 XP; finishing hint-free earns +10. Keep XP values in the ranges the existing missions use.
 - Every mission has a **`teach` list** — one micro-lesson string per objective (same order). It prints the moment that objective completes and again in the end-of-mission recap. The selftest's lint **fails** if lengths don't match. Write the *transferable concept*, not a restatement of the desc.
 - The selftest runs a **lint pass first** (required fields, unique ids, topic registered, XP 5–40, teach parity, handler regexes compile) — contributor mistakes fail fast in CI (`.github/workflows/selftest.yml`).
 - **Vault sync**: `save_profile` renders a markdown progress note into the player's Obsidian vault if `quest.config.json` (gitignored) points at one — see `--link-vault`. `sync_vault_note` must never raise into the game.
+- **`study.py` is the study half — `learn` reads the player's own vault** (`--vault <folder>`, or inferred from the linked progress note's folder). It parses structure the notes already have rather than asking authors for new markup: `## Self-check quiz` + `> [!question]-` → the quiz, `## 🃏 Flashcards` + `> [!question]-` → the deck, `## Drills` + `- [ ] **(10 XP) Name.**` → side quests. Rules: it renders markdown to the terminal itself (no dependencies), pages long output, and **every** vault read is guarded — an unmounted drive or a note with no headings must degrade to a message, never an exception (the engine wraps the whole call too). Reading pays **no** XP; the **Scholar bonus** (+5) is paid at mission end for consulting the note with zero hints, which is the only way study touches the economy. Mastery (cards known, best quiz score, 🌟 perfect decks, badges) lives in `profile["study"]`/`profile["badges"]`, is saved the moment it is earned, and is written back into the vault progress note.
 - **Demo mode** (`demo` in a fresh mission) replays the `solution` step-by-step: Enter advances, `takeover` hands control back mid-run. Objectives completed during demo pay 0 XP and an all-demo run is never recorded — watching teaches, doing scores. Because `solution` doubles as the demo script, keep solutions clean and pedagogically ordered (inspect → act → verify), not just minimal.
 - Error messages should mimic the real tools' output (e.g. `denied: requested access to the resource is denied`) — the authenticity is the pedagogy. A dim parenthetical teaching hint after a realistic error is the house style.
 - **Unknown commands teach, never scold.** `REAL_WORLD` in `engine.py` maps common real-world commands (winget/apt/wsl/sudo/vim/image-names-as-commands/…) to a 🌍 micro-lesson explaining how the real tool maps to the sim; `MISSION_TOOLS` redirects tools that live in other missions. Teach-only/unknown responses set `world.flags["_noop"]` so they don't count as "moves" (and so `demo` stays available); a state-mutating command must never set it. `demo!` resets the world mid-mission to allow watching after moves. When adding a fallback error branch, set `_noop` there too.
@@ -59,8 +60,11 @@ Runs ~150 command cases through both the simulated shell and the machine's **rea
   REJECTS `echo hi |` / `;;` / a leading `|` the way bash does, brace expansion, globbing
   (dotfiles hidden unless the pattern leads with `.`; a trailing `/` means directories only),
   pipes (`|` and `|&`), `> >> < 2> 2>&1 1>&2`, `; && ||`, exit codes, cwd, mode bits that
-  actually deny reads, processes, cron and tar over `world.files` + `world.flags`.
-  `missions/linux_basics.py` holds only mission data.
+  actually deny (a file's read bit AND a directory's write/search bits — `chmod 500 d` then
+  `touch d/f` is Permission denied), processes, cron and tar over `world.files` +
+  `world.flags`. `missions/linux_basics.py` holds only mission data — including the
+  `WORKSPACE` files missions 2 and 3 start with, because they continue mission 1's story and
+  a directory the student built an hour ago must still be there.
   - Every builtin returns `Res(out, err, code, nonl)`. `out` is the stream minus at most one
     trailing newline and `nonl` says whether that newline was there — that is what makes
     `wc -c` honest about `echo a > f` (2) vs `printf a > f` (1). Use `stream(text)` to build
@@ -70,8 +74,23 @@ Runs ~150 command cases through both the simulated shell and the machine's **rea
     redirection inside a script behave exactly as at the prompt. `shell()` is a thin wrapper.
   - `sort`/`ls`/globs order with `collate()` (glibc dictionary collation), not codepoints.
     `Gamma` after `alpha` is what the student's terminal shows.
+  - **It has to FEEL like a terminal too**, or the simulation is beside the point. The prompt
+    carries the cwd (`prompt(world)`), arrow keys and Tab work (engine imports `readline` and
+    binds `mission["complete"]`; colour codes in a prompt are fenced with `\001…\002` or
+    readline miscounts the column), and `clear` goes out through `io.write()` raw — printed as
+    a line, its escape leaves the cursor one row down. Without readline the arrows arrive as
+    raw bytes; `edit_keys()` strips them and says so rather than running a line the player
+    never typed.
+  - **Every command answers `--help`, and it is the same page as `help <cmd>` and `man <cmd>`.**
+    Pages live in `missions/linux_help.py` as structured records (usage · summary · the flags
+    THIS shell implements · notes · examples · the real tool's flags we don't simulate), so
+    they stay honest in both directions, render as plain text (help must pipe), and end by
+    pointing at the real binary on the player's own machine. Add a command → add its page;
+    the shell test fails on any `$PATH` command without one. `help` with no argument prints
+    the grouped index, topics (`redirection`, `pipes`, `globs`, `variables`, `scripts`,
+    `permissions`) included.
   **The bar is behavioural honesty, not feature count.** `tests/test_shell_vs_bash.py` runs
-  ~285 cases through BOTH this shell and the machine's real bash and fails on any divergence
+  ~300 cases through BOTH this shell and the machine's real bash and fails on any divergence
   — it runs in CI next to the selftest. Add a case there for anything you touch. Two waiver
   sets exist and both are linted against `CASES` (a stale name fails the run): `ENV_SPECIFIC`
   for machine facts, `ORDER_FREE` for output whose order the filesystem doesn't define
@@ -98,7 +117,7 @@ Runs ~150 command cases through both the simulated shell and the machine's **rea
 
 When a new class/topic appears in the course (upstream: `yfreifeld/devops-course`), extend BOTH games in one commit: new mission(s) if the topic is hands-on simulatable, plus quiz questions for the topic. Companion study notes live at https://github.com/iceteps/devops-study-vault — each mission's `vault_note` field names its note; keep them consistent.
 
-Adding a topic also touches three things that silently go stale: `TOPICS`/`ALL_MISSIONS` order in `missions/__init__.py` (it drives both the map's numbering and "next up"), the `CATCHUP_ROUTE` table in `quest.py` (the ordered path for a student returning after missed classes — topic, note, and which REAL graded assignment it prepares for), and the README's mission table, which is numbered. Current state: **19 missions, 81 quiz questions**.
+Adding a topic also touches three things that silently go stale: `TOPICS`/`ALL_MISSIONS` order in `missions/__init__.py` (it drives both the map's numbering and "next up"), the `CATCHUP_ROUTE` table in `quest.py` (the ordered path for a student returning after missed classes — topic, note, and which REAL graded assignment it prepares for), and the README's mission table, which is numbered. Current state: **30 missions, 120 quiz questions**.
 
 ## Repo hygiene
 
