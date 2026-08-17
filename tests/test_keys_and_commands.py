@@ -22,8 +22,10 @@ import os
 import pty
 import re
 import select
+import shutil
 import struct
 import sys
+import tempfile
 import termios
 import time
 
@@ -57,6 +59,90 @@ def restore_profile():
 
 
 atexit.register(restore_profile)
+
+# The Codex reads the player's OWN vault (quest.config.json → vault_dir), so on
+# a fresh runner `/learn` correctly says "no vault linked" and every Codex check
+# fails for the wrong reason. Bring one: three tiny notes in a throwaway folder,
+# with the config parked exactly the way the profile is. Now the Codex is tested
+# the same here and in CI, and against notes whose content the test knows.
+CONFIG = os.path.join(HERE, "quest.config.json")
+PARKED_CONFIG = CONFIG + ".test-backup"
+VAULT = tempfile.mkdtemp(prefix="quest-test-vault-")
+
+# Deliberately NOT the missions' real `vault_note` names: unmatched notes keep
+# the index's alphabetical order, so `2` is always Class 02 whatever the course
+# spine grows into.
+NOTES = {
+    "Class 01 - Fixture Basics": """---
+tags: [fixture]
+---
+
+## Overview
+The shell is a program that reads a line and runs it.
+
+> [!abstract] TL;DR
+> One note, three sections — enough for the Codex to page through.
+
+## Commands
+`ls` lists, `cd` moves, `pwd` says where you are.
+
+## 🃏 Flashcards
+> [!question]- What does `pwd` print?
+> The absolute path of the working directory.
+
+> [!question]- Which command lists a folder?
+> `ls`
+
+## Self-check quiz
+> [!question]- Which flag makes `ls` show hidden files?
+> `-a`
+
+## Drills
+- [ ] **(10 XP) Print the working directory.** Run it, read it, move one folder up.
+""",
+    "Class 02 - Fixture Containers": """
+## Images and containers
+An image is the recipe; a container is the meal.
+
+## Ports
+`-p 8080:80` maps a host port onto a container port.
+
+## 🃏 Flashcards
+> [!question]- What does `docker ps` show?
+> The containers that are running right now.
+""",
+    "Class 03 - Fixture Git": """
+## Commits
+A commit is a snapshot plus a message saying why.
+
+## Branches
+A branch is a movable name pointing at one commit.
+""",
+}
+
+# No `# H1` — an Obsidian note is titled by its filename, and an H1 would shift
+# every section number by one.
+for title, body in NOTES.items():
+    with open(os.path.join(VAULT, title + ".md"), "w", encoding="utf-8") as f:
+        f.write(body.lstrip("\n"))
+
+if os.path.exists(CONFIG):
+    os.replace(CONFIG, PARKED_CONFIG)
+with open(CONFIG, "w", encoding="utf-8") as f:
+    json.dump({"vault_dir": VAULT}, f)
+
+
+def restore_config():
+    try:
+        os.remove(CONFIG)
+    except OSError:
+        pass
+    if os.path.exists(PARKED_CONFIG):
+        os.replace(PARKED_CONFIG, CONFIG)
+    shutil.rmtree(VAULT, ignore_errors=True)
+
+
+atexit.register(restore_config)
 
 
 class Term:
@@ -214,23 +300,29 @@ screen = t.read(1.2)
 check("/learn lists the Codex", "THE CODEX" in screen, screen[-200:])
 check("the Codex is numbered", "  1. " in screen or " 1." in screen, screen[-300:])
 check("the Codex prompts for input", "open a note" in screen and "›" in screen, screen[-200:])
-if "THE CODEX" in screen:                       # only if a vault is linked here
-    t.send("2\n")
-    screen = t.read(1.5)
-    check("a number opens that note", "📖" in screen and "section number" in screen,
-          screen[-200:])
-    t.send("\n")                                # a stray Enter must NOT leave
-    screen = t.read(1.0)
-    check("Enter alone just gives a fresh prompt", "THE CODEX" not in screen, screen[-200:])
-    check("...and the prompt is still there", "›" in screen, repr(screen[-80:]))
-    t.send("quit\n")
-    screen = t.read(1.2)
-    check("`quit` goes back to the Codex, not out of it", "THE CODEX" in screen, screen[-200:])
-    t.send("class 3\n")
-    screen = t.read(1.5)
-    check("`class 3` opens class 3", "Class 03" in screen, screen[-300:])
-    t.send("quit\n")
-    t.read(1.0)
+t.send("2\n")                                   # the fixture vault's second note
+screen = t.read(1.5)
+check("a number opens that note", "📖" in screen and "section number" in screen,
+      screen[-200:])
+check("...and it's the note the number pointed at", "Fixture Containers" in screen,
+      screen[-300:])
+t.send("\n")                                    # a stray Enter must NOT leave
+screen = t.read(1.0)
+check("Enter alone just gives a fresh prompt", "THE CODEX" not in screen, screen[-200:])
+check("...and the prompt is still there", "›" in screen, repr(screen[-80:]))
+t.send("1\n")                                   # a section by number
+screen = t.read(1.2)
+check("a section number opens that section", "recipe" in screen, screen[-300:])
+t.send("\n")
+t.read(0.8)
+t.send("quit\n")
+screen = t.read(1.2)
+check("`quit` goes back to the Codex, not out of it", "THE CODEX" in screen, screen[-200:])
+t.send("class 3\n")
+screen = t.read(1.5)
+check("`class 3` opens class 3", "Class 03" in screen, screen[-300:])
+t.send("quit\n")
+t.read(1.0)
 t.send("quit\n")                                # `quit` = back to the map
 t.read(1.0)
 
